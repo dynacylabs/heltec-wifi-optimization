@@ -105,6 +105,10 @@
       <div class="chart-help">Per-client signal strength as seen by the STA, one line per connected device (Blink Sync Module, Shelly relay, etc). A client with no line for a period was disconnected during that window.</div>
       <canvas id="chart-wifi24-rssi"></canvas>
     </div>
+    <div class="chart-box">
+      <div class="chart-help">Per-client retry fraction, same interpretation as HaLow retries above - occasional small spikes are normal, a sustained climb on one client is the real signal to investigate.</div>
+      <canvas id="chart-wifi24-retries"></canvas>
+    </div>
   </div>
 
   <h2>Command History</h2>
@@ -221,6 +225,8 @@ function initCharts() {
   charts.wifi24Channel.options.plugins.title = { display: true, text: "2.4GHz Channel", color: "#c9d1d9" };
   charts.wifi24Rssi = new Chart(document.getElementById("chart-wifi24-rssi"), chartOpts("dBm"));
   charts.wifi24Rssi.options.plugins.title = { display: true, text: "2.4GHz Client RSSI", color: "#c9d1d9" };
+  charts.wifi24Retries = new Chart(document.getElementById("chart-wifi24-retries"), chartOpts("fraction retried"));
+  charts.wifi24Retries.options.plugins.title = { display: true, text: "2.4GHz Client Retries", color: "#c9d1d9" };
 
   document.getElementById("range-picker").addEventListener("click", (e) => {
     if (e.target.tagName !== "BUTTON") return;
@@ -294,7 +300,8 @@ async function refreshCharts() {
 
   // Per-client RSSI: one dataset per (device, client_mac) pair actually seen
   // in the window, since there's no fixed small set of roles to color by.
-  const clientDatasets = [];
+  const clientRssiDatasets = [];
+  const clientRetriesDatasets = [];
   let colorIdx = 0;
   for (const d of devices) {
     const clientSeries = await fetchClientSeries(d.mac, "wifi24", selectedHours);
@@ -304,10 +311,14 @@ async function refreshCharts() {
     }
     for (const [clientMac, points] of Object.entries(byClient)) {
       const label = points[0].host || clientMac;
-      clientDatasets.push({
-        label, borderColor: colorForIndex(colorIdx), backgroundColor: colorForIndex(colorIdx),
-        pointRadius: 0, borderWidth: 2,
+      const color = colorForIndex(colorIdx);
+      clientRssiDatasets.push({
+        label, borderColor: color, backgroundColor: color, pointRadius: 0, borderWidth: 2,
         data: points.map(p => ({ x: p.time, y: p.rssi })),
+      });
+      clientRetriesDatasets.push({
+        label, borderColor: color, backgroundColor: color, pointRadius: 0, borderWidth: 2,
+        data: points.map(p => ({ x: p.time, y: p.retries })),
       });
       colorIdx++;
     }
@@ -316,8 +327,9 @@ async function refreshCharts() {
   charts.rssi.data.datasets = rssiDatasets; charts.rssi.update();
   charts.retries.data.datasets = retriesDatasets; charts.retries.update();
   charts.bandwidth.data.datasets = bwDatasets; charts.bandwidth.update();
+  charts.wifi24Retries.data.datasets = clientRetriesDatasets; charts.wifi24Retries.update();
   charts.wifi24Channel.data.datasets = wifi24ChDatasets; charts.wifi24Channel.update();
-  charts.wifi24Rssi.data.datasets = clientDatasets; charts.wifi24Rssi.update();
+  charts.wifi24Rssi.data.datasets = clientRssiDatasets; charts.wifi24Rssi.update();
 }
 
 function statusBadge(status) {

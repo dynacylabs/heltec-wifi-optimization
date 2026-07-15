@@ -16,7 +16,12 @@ DEFAULT_COMMAND_TTL_SECONDS = {
 }
 
 # Rule-based optimizer thresholds. Deliberately simple for v1 - see
-# optimizer.py for why channel/width selection itself is stubbed.
+# optimizer.py for why channel/width selection itself is round-robin
+# rather than scan-scored.
 RETRY_RATE_DEGRADED_THRESHOLD = 0.15  # fraction of frames retried
 DEGRADED_SUSTAIN_MINUTES = 10
 CHANNEL_COOLDOWN_MINUTES = 360  # don't re-evaluate more than every 6h
+
+# Standard non-overlapping 2.4GHz channels (US). Unlike HaLow, there's no
+# bandwidth-dependent numbering complexity here.
+WIFI24_CHANNELS = [1, 6, 11]

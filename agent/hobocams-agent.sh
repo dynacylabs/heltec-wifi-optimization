@@ -149,10 +149,16 @@ collect_wifi24() {
         [ -z "$mac" ] && break
         signal="$(echo "$assoc" | jsonfilter -e "@.results[$i].signal" 2>/dev/null)"
         rate_raw="$(echo "$assoc" | jsonfilter -e "@.results[$i].tx.rate" 2>/dev/null)"
+        retries_cum="$(echo "$assoc" | jsonfilter -e "@.results[$i].tx.retries" 2>/dev/null)"
+        packets_cum="$(echo "$assoc" | jsonfilter -e "@.results[$i].tx.packets" 2>/dev/null)"
         rate_mbps=""
         [ -n "$rate_raw" ] && rate_mbps="$(awk -v r="$rate_raw" 'BEGIN{printf "%.2f", r/1000}')"
+        retry_rate=""
+        if [ -n "$retries_cum" ] && [ -n "$packets_cum" ]; then
+            retry_rate="$(delta_rate "wifi24-retries-$mac" "$retries_cum" "$packets_cum")"
+        fi
         [ "$first" -eq 0 ] && clients="$clients,"
-        clients="$clients{\"mac\":\"$mac\",\"rssi\":$(jnum "$signal"),\"rate_mbps\":$(jnum "$rate_mbps")}"
+        clients="$clients{\"mac\":\"$mac\",\"rssi\":$(jnum "$signal"),\"rate_mbps\":$(jnum "$rate_mbps"),\"retries\":$(jnum "$retry_rate")}"
         first=0
         i=$((i + 1))
     done

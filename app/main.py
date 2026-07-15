@@ -102,10 +102,10 @@ async def post_telemetry(request: Request):
                 for client in radio.clients:
                     await conn.execute(
                         """
-                        INSERT INTO radio_clients (time, device_id, radio, client_mac, host, rssi, rate_mbps)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        INSERT INTO radio_clients (time, device_id, radio, client_mac, host, rssi, rate_mbps, retries)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                         """,
-                        now, device_id, radio.radio, client.mac, client.host, client.rssi, client.rate_mbps,
+                        now, device_id, radio.radio, client.mac, client.host, client.rssi, client.rate_mbps, client.retries,
                     )
 
 
@@ -273,7 +273,7 @@ async def get_radio_client_history(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT rc.time, rc.client_mac, rc.host, rc.rssi, rc.rate_mbps
+            SELECT rc.time, rc.client_mac, rc.host, rc.rssi, rc.rate_mbps, rc.retries
             FROM radio_clients rc JOIN devices d ON d.id = rc.device_id
             WHERE d.mac = $1 AND rc.radio = $2 AND rc.time > now() - ($3 || ' hours')::interval
             ORDER BY rc.time ASC

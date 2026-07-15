@@ -9,6 +9,7 @@ class RadioClient(BaseModel):
     host: Optional[str] = None
     rssi: Optional[int] = None
     rate_mbps: Optional[float] = None
+    retries: Optional[float] = None  # fraction of frames retried this interval
 
 
 class RadioTelemetry(BaseModel):
@@ -81,6 +82,7 @@ class RadioClientPoint(BaseModel):
     host: Optional[str] = None
     rssi: Optional[int] = None
     rate_mbps: Optional[float] = None
+    retries: Optional[float] = None
 
 
 class CommandHistoryEntry(BaseModel):
