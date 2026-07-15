@@ -95,6 +95,18 @@
     </div>
   </div>
 
+  <h2>2.4GHz Link History (STA &rarr; Blink/Shelly)</h2>
+  <div class="charts">
+    <div class="chart-box">
+      <div class="chart-help">Which channel the STA's 2.4GHz radio is broadcasting on for Blink/Shelly to join. Step chart, same reasoning as HaLow bandwidth above - flat means unchanged.</div>
+      <canvas id="chart-wifi24-channel"></canvas>
+    </div>
+    <div class="chart-box">
+      <div class="chart-help">Per-client signal strength as seen by the STA, one line per connected device (Blink Sync Module, Shelly relay, etc). A client with no line for a period was disconnected during that window.</div>
+      <canvas id="chart-wifi24-rssi"></canvas>
+    </div>
+  </div>
+
   <h2>Command History</h2>
   <div id="command-history"></div>
 </div>
@@ -205,6 +217,10 @@ function initCharts() {
   charts.retries.options.plugins.title = { display: true, text: "HaLow Retries", color: "#c9d1d9" };
   charts.bandwidth = new Chart(document.getElementById("chart-bandwidth"), chartOpts("MHz"));
   charts.bandwidth.options.plugins.title = { display: true, text: "HaLow Bandwidth", color: "#c9d1d9" };
+  charts.wifi24Channel = new Chart(document.getElementById("chart-wifi24-channel"), chartOpts("channel"));
+  charts.wifi24Channel.options.plugins.title = { display: true, text: "2.4GHz Channel", color: "#c9d1d9" };
+  charts.wifi24Rssi = new Chart(document.getElementById("chart-wifi24-rssi"), chartOpts("dBm"));
+  charts.wifi24Rssi.options.plugins.title = { display: true, text: "2.4GHz Client RSSI", color: "#c9d1d9" };
 
   document.getElementById("range-picker").addEventListener("click", (e) => {
     if (e.target.tagName !== "BUTTON") return;
@@ -222,6 +238,19 @@ async function fetchSeries(mac, radio, hours) {
   return await resp.json();
 }
 
+async function fetchClientSeries(mac, radio, hours) {
+  const resp = await api(`/api/radio-clients/${encodeURIComponent(mac)}?radio=${radio}&hours=${hours}`);
+  if (!resp.ok) return [];
+  return await resp.json();
+}
+
+// Cycles through a fixed palette for an arbitrary number of 2.4GHz clients
+// (unlike AP/STA, there's no fixed small set of roles to color by).
+const CLIENT_COLORS = ["#58a6ff", "#3fb950", "#d29922", "#f85149", "#bc8cff", "#39c5cf"];
+function colorForIndex(i) {
+  return CLIENT_COLORS[i % CLIENT_COLORS.length];
+}
+
 async function refreshCharts() {
   const statusResp = await api("/api/status");
   if (!statusResp.ok) return;
@@ -230,6 +259,7 @@ async function refreshCharts() {
   const rssiDatasets = [];
   const retriesDatasets = [];
   const bwDatasets = [];
+  const wifi24ChDatasets = [];
   const colors = { AP: "#58a6ff", STA: "#3fb950" };
 
   for (const d of devices) {
@@ -253,11 +283,41 @@ async function refreshCharts() {
       stepped: true,
       data: series.map(p => ({ x: p.time, y: p.bandwidth_mhz })),
     });
+
+    const wifi24Series = await fetchSeries(d.mac, "wifi24", selectedHours);
+    wifi24ChDatasets.push({
+      label: `${d.role} Channel`, borderColor: color, backgroundColor: color, pointRadius: 0, borderWidth: 2,
+      stepped: true,
+      data: wifi24Series.map(p => ({ x: p.time, y: p.channel })),
+    });
+  }
+
+  // Per-client RSSI: one dataset per (device, client_mac) pair actually seen
+  // in the window, since there's no fixed small set of roles to color by.
+  const clientDatasets = [];
+  let colorIdx = 0;
+  for (const d of devices) {
+    const clientSeries = await fetchClientSeries(d.mac, "wifi24", selectedHours);
+    const byClient = {};
+    for (const p of clientSeries) {
+      (byClient[p.client_mac] ??= []).push(p);
+    }
+    for (const [clientMac, points] of Object.entries(byClient)) {
+      const label = points[0].host || clientMac;
+      clientDatasets.push({
+        label, borderColor: colorForIndex(colorIdx), backgroundColor: colorForIndex(colorIdx),
+        pointRadius: 0, borderWidth: 2,
+        data: points.map(p => ({ x: p.time, y: p.rssi })),
+      });
+      colorIdx++;
+    }
   }
 
   charts.rssi.data.datasets = rssiDatasets; charts.rssi.update();
   charts.retries.data.datasets = retriesDatasets; charts.retries.update();
   charts.bandwidth.data.datasets = bwDatasets; charts.bandwidth.update();
+  charts.wifi24Channel.data.datasets = wifi24ChDatasets; charts.wifi24Channel.update();
+  charts.wifi24Rssi.data.datasets = clientDatasets; charts.wifi24Rssi.update();
 }
 
 function statusBadge(status) {

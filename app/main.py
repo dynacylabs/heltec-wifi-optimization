@@ -15,6 +15,7 @@ from models import (
     CommandOut,
     CommandReport,
     DeviceStatus,
+    RadioClientPoint,
     RadioSnapshot,
     TelemetryPoint,
     TelemetryReport,
@@ -260,6 +261,26 @@ async def get_telemetry_history(
             device_mac, radio, str(hours),
         )
         return [TelemetryPoint(**dict(r)) for r in rows]
+
+
+@app.get("/api/radio-clients/{device_mac}", response_model=list[RadioClientPoint], dependencies=[Depends(require_token)])
+async def get_radio_client_history(
+    device_mac: str,
+    radio: str = Query(default="wifi24", pattern="^(halow|wifi24)$"),
+    hours: float = Query(default=6, gt=0, le=24 * 30),
+):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT rc.time, rc.client_mac, rc.host, rc.rssi, rc.rate_mbps
+            FROM radio_clients rc JOIN devices d ON d.id = rc.device_id
+            WHERE d.mac = $1 AND rc.radio = $2 AND rc.time > now() - ($3 || ' hours')::interval
+            ORDER BY rc.time ASC
+            """,
+            device_mac, radio, str(hours),
+        )
+        return [RadioClientPoint(**dict(r)) for r in rows]
 
 
 @app.get("/api/commands", response_model=list[CommandHistoryEntry], dependencies=[Depends(require_token)])

@@ -40,18 +40,33 @@ uncommitted edit, or maintain them in a private fork/branch.
 
 ## Status page
 
-`http://<host>:8080/dashboard` is a self-contained status page (no Grafana
-knowledge required) served directly by the app — live device status
-(online/offline, current channel/RSSI/noise/bandwidth per radio),
-scalable-time-range HaLow history charts, and a command history table
-(what was attempted, target value, and whether it was kept: pending →
-applied → acked/reverted/expired). First visit prompts for the API token
-(same one from `API_TOKEN`/`HOBOCAMS_API_TOKEN`), stored in the browser's
-`localStorage` afterward. It's backed by three read endpoints
-(`/api/status`, `/api/telemetry/{mac}`, `/api/commands`) protected by the
-same token as the device-facing endpoints — no separate secret to manage.
-Uptime is a simple online/offline indicator based on how recently a
-device last reported in, not a historical uptime-percentage tracker.
+`http://<host>:8080/` (redirects to `/dashboard`) is a self-contained
+status page (no Grafana knowledge required) served directly by the app:
+
+- **Live status cards** — online/offline per device, current HaLow
+  channel/bandwidth/RSSI/noise/rate/retries, current 2.4GHz channel and
+  client count, and uptime % over whichever time range is selected below
+  (computed via gap analysis over the telemetry heartbeat, bookended at
+  the window edges so an outage right at the start or still ongoing "now"
+  both count).
+- **HaLow history charts** — RSSI/noise, retries, bandwidth — over a
+  selectable time range (1h/6h/24h/7d).
+- **2.4GHz history charts** — channel over time, and per-client RSSI (one
+  line per connected device on the STA's downstream SSID, e.g. Blink Sync
+  Module, Shelly relay) — a client with no line for a stretch was
+  disconnected during that window.
+- **Command history table** — what was attempted, target value, and
+  whether it was kept (`pending` → `applied` → `acked`/`reverted`/`expired`).
+
+The API token is injected server-side when rendering the page — no
+prompt, nothing stored in the browser. Access control for a human is
+expected to happen at the reverse proxy (Authelia or similar) in front of
+whichever domain you point at this page; the token itself stays required
+on every backing endpoint (`/api/status`, `/api/telemetry/{mac}`,
+`/api/radio-clients/{mac}`, `/api/commands`) as defense in depth, since
+this same container may also be reachable through a domain that isn't
+behind your auth layer (e.g. the device-facing API domain, if you're
+exposing that separately - see "API authentication" below).
 
 ## Deploying the agent (on each Heltec device)
 

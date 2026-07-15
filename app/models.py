@@ -75,6 +75,14 @@ class TelemetryPoint(BaseModel):
     bandwidth_mhz: Optional[int] = None
 
 
+class RadioClientPoint(BaseModel):
+    time: datetime
+    client_mac: str
+    host: Optional[str] = None
+    rssi: Optional[int] = None
+    rate_mbps: Optional[float] = None
+
+
 class CommandHistoryEntry(BaseModel):
     id: int
     device_mac: str
