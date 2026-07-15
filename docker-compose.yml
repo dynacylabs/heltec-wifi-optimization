@@ -3,9 +3,9 @@ services:
     image: timescale/timescaledb:latest-pg16
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-hobocams}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a password in .env}
-      POSTGRES_DB: ${POSTGRES_DB:-hobocams}
+      POSTGRES_USER: hobocams
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: hobocams
     volumes:
       - timescale_data:/var/lib/postgresql/data
       - ./db/migrations:/docker-entrypoint-initdb.d
@@ -16,8 +16,8 @@ services:
     build: ./app
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-hobocams}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB:-hobocams}
-      OPTIMIZER_INTERVAL_SECONDS: ${OPTIMIZER_INTERVAL_SECONDS:-300}
+      DATABASE_URL: postgresql://hobocams:changeme@timescaledb:5432/hobocams
+      OPTIMIZER_INTERVAL_SECONDS: "300"
     depends_on:
       - timescaledb
     ports:
@@ -27,10 +27,10 @@ services:
     image: grafana/grafana:latest
     restart: unless-stopped
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set a password in .env}
-      POSTGRES_DB: ${POSTGRES_DB:-hobocams}
-      POSTGRES_USER: ${POSTGRES_USER:-hobocams}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a password in .env}
+      GF_SECURITY_ADMIN_PASSWORD: changeme
+      POSTGRES_DB: hobocams
+      POSTGRES_USER: hobocams
+      POSTGRES_PASSWORD: changeme
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning

@@ -16,15 +16,22 @@ so a bad change can't permanently sever the link.
 
 ## Deploying the server
 
+Credentials live directly in `docker-compose.yml` (no `.env` file) —
+**edit the `changeme` values before deploying, and if you keep this repo
+public, do not commit your real values.** Either keep them as a local,
+uncommitted edit, or maintain them in a private fork/branch.
+
 1. Clone this repo wherever you want to run it.
-2. `cp .env.example .env` and fill in real passwords.
+2. Edit `docker-compose.yml` and replace every `changeme` with a real
+   password (`POSTGRES_PASSWORD` appears in three places and must match
+   across all of them; `GF_SECURITY_ADMIN_PASSWORD` is independent).
 3. `docker compose up -d --build`
    - First boot runs `db/migrations/001_init.sql` automatically (Postgres
      only runs `/docker-entrypoint-initdb.d` on an empty data volume).
 4. Check `http://<host>:8080/health` returns `{"status": "ok"}`.
-5. Grafana at `http://<host>:3000` (login `admin` / `GRAFANA_ADMIN_PASSWORD`
-   from `.env`) — the TimescaleDB datasource and a starter "HoboCams
-   Overview" dashboard are already provisioned.
+5. Grafana at `http://<host>:3000` (login `admin` / whatever you set for
+   `GF_SECURITY_ADMIN_PASSWORD`) — the TimescaleDB datasource and a starter
+   "HoboCams Overview" dashboard are already provisioned.
 
 ## Deploying the agent (on each Heltec device)
 
