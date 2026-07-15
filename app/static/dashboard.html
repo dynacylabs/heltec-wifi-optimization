@@ -93,6 +93,10 @@
       <div class="chart-help">Current HaLow channel width in MHz. This is a step chart - it only moves when a config change actually happens, so a flat line just means nothing's been changed yet (expected until the rule-based optimizer is built and starts issuing commands).</div>
       <canvas id="chart-bandwidth"></canvas>
     </div>
+    <div class="chart-box">
+      <div class="chart-help">Actual data throughput (solid) against the currently negotiated PHY rate (dashed, the "ceiling"). This ratio is what the optimizer's bandwidth widen/narrow decision watches - sustained high utilization triggers widening, sustained low utilization (over a much longer window) triggers narrowing.</div>
+      <canvas id="chart-throughput"></canvas>
+    </div>
   </div>
 
   <h2>2.4GHz Link History (STA &rarr; Blink/Shelly)</h2>
@@ -175,6 +179,7 @@ async function refreshStatus() {
         <div class="k">HaLow bandwidth</div><div class="v">${fmt(h.bandwidth_mhz, " MHz")}</div>
         <div class="k">HaLow RSSI / Noise</div><div class="v">${fmt(h.rssi, " dBm")} / ${fmt(h.noise, " dBm")}</div>
         <div class="k">HaLow rate (MCS)</div><div class="v">${fmt(h.rate_mbps, " Mbit/s")} (MCS ${fmt(h.mcs)})</div>
+        <div class="k">HaLow throughput</div><div class="v">${fmt(h.throughput_mbps, " Mbit/s")}${h.throughput_mbps != null && h.rate_mbps ? ` (${(h.throughput_mbps / h.rate_mbps * 100).toFixed(0)}% util)` : ""}</div>
         <div class="k">HaLow retries</div><div class="v">${h.retries != null ? (h.retries * 100).toFixed(1) + "%" : "—"}</div>
         <div class="k">2.4GHz channel</div><div class="v">${fmt(w.channel)}</div>
         <div class="k">2.4GHz clients</div><div class="v">${d.wifi24_client_count}</div>
@@ -221,6 +226,8 @@ function initCharts() {
   charts.retries.options.plugins.title = { display: true, text: "HaLow Retries", color: "#c9d1d9" };
   charts.bandwidth = new Chart(document.getElementById("chart-bandwidth"), chartOpts("MHz"));
   charts.bandwidth.options.plugins.title = { display: true, text: "HaLow Bandwidth", color: "#c9d1d9" };
+  charts.throughput = new Chart(document.getElementById("chart-throughput"), chartOpts("Mbit/s"));
+  charts.throughput.options.plugins.title = { display: true, text: "HaLow Throughput", color: "#c9d1d9" };
   charts.wifi24Channel = new Chart(document.getElementById("chart-wifi24-channel"), chartOpts("channel"));
   charts.wifi24Channel.options.plugins.title = { display: true, text: "2.4GHz Channel", color: "#c9d1d9" };
   charts.wifi24Rssi = new Chart(document.getElementById("chart-wifi24-rssi"), chartOpts("dBm"));
@@ -265,6 +272,7 @@ async function refreshCharts() {
   const rssiDatasets = [];
   const retriesDatasets = [];
   const bwDatasets = [];
+  const throughputDatasets = [];
   const wifi24ChDatasets = [];
   const colors = { AP: "#58a6ff", STA: "#3fb950" };
 
@@ -288,6 +296,14 @@ async function refreshCharts() {
       label: `${d.role} Bandwidth`, borderColor: color, backgroundColor: color, pointRadius: 0, borderWidth: 2,
       stepped: true,
       data: series.map(p => ({ x: p.time, y: p.bandwidth_mhz })),
+    });
+    throughputDatasets.push({
+      label: `${d.role} Throughput`, borderColor: color, backgroundColor: color, pointRadius: 0, borderWidth: 2,
+      data: series.map(p => ({ x: p.time, y: p.throughput_mbps })),
+    });
+    throughputDatasets.push({
+      label: `${d.role} PHY rate`, borderColor: color, borderDash: [4, 4], pointRadius: 0, borderWidth: 1,
+      data: series.map(p => ({ x: p.time, y: p.rate_mbps })),
     });
 
     const wifi24Series = await fetchSeries(d.mac, "wifi24", selectedHours);
@@ -327,6 +343,7 @@ async function refreshCharts() {
   charts.rssi.data.datasets = rssiDatasets; charts.rssi.update();
   charts.retries.data.datasets = retriesDatasets; charts.retries.update();
   charts.bandwidth.data.datasets = bwDatasets; charts.bandwidth.update();
+  charts.throughput.data.datasets = throughputDatasets; charts.throughput.update();
   charts.wifi24Retries.data.datasets = clientRetriesDatasets; charts.wifi24Retries.update();
   charts.wifi24Channel.data.datasets = wifi24ChDatasets; charts.wifi24Channel.update();
   charts.wifi24Rssi.data.datasets = clientRssiDatasets; charts.wifi24Rssi.update();

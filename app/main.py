@@ -93,11 +93,11 @@ async def post_telemetry(request: Request):
             for radio in report.radios:
                 await conn.execute(
                     """
-                    INSERT INTO telemetry (time, device_id, radio, rssi, noise, mcs, rate_mbps, retries, channel, bandwidth_mhz)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    INSERT INTO telemetry (time, device_id, radio, rssi, noise, mcs, rate_mbps, retries, channel, bandwidth_mhz, throughput_mbps)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     """,
                     now, device_id, radio.radio, radio.rssi, radio.noise, radio.mcs,
-                    radio.rate_mbps, radio.retries, radio.channel, radio.bandwidth_mhz,
+                    radio.rate_mbps, radio.retries, radio.channel, radio.bandwidth_mhz, radio.throughput_mbps,
                 )
                 for client in radio.clients:
                     await conn.execute(
@@ -208,7 +208,7 @@ async def get_status(hours: float = Query(default=24, gt=0, le=24 * 30)):
         for d in devices:
             halow = await conn.fetchrow(
                 """
-                SELECT time, rssi, noise, mcs, rate_mbps, retries, channel, bandwidth_mhz
+                SELECT time, rssi, noise, mcs, rate_mbps, retries, channel, bandwidth_mhz, throughput_mbps
                 FROM telemetry WHERE device_id = $1 AND radio = 'halow'
                 ORDER BY time DESC LIMIT 1
                 """,
@@ -216,7 +216,7 @@ async def get_status(hours: float = Query(default=24, gt=0, le=24 * 30)):
             )
             wifi24 = await conn.fetchrow(
                 """
-                SELECT time, rssi, noise, mcs, rate_mbps, retries, channel, bandwidth_mhz
+                SELECT time, rssi, noise, mcs, rate_mbps, retries, channel, bandwidth_mhz, throughput_mbps
                 FROM telemetry WHERE device_id = $1 AND radio = 'wifi24'
                 ORDER BY time DESC LIMIT 1
                 """,
@@ -253,7 +253,7 @@ async def get_telemetry_history(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT t.time, t.rssi, t.noise, t.mcs, t.rate_mbps, t.retries, t.channel, t.bandwidth_mhz
+            SELECT t.time, t.rssi, t.noise, t.mcs, t.rate_mbps, t.retries, t.channel, t.bandwidth_mhz, t.throughput_mbps
             FROM telemetry t JOIN devices d ON d.id = t.device_id
             WHERE d.mac = $1 AND t.radio = $2 AND t.time > now() - ($3 || ' hours')::interval
             ORDER BY t.time ASC

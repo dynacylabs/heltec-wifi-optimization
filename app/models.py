@@ -21,6 +21,7 @@ class RadioTelemetry(BaseModel):
     retries: Optional[float] = None  # fraction of frames retried this interval
     channel: Optional[int] = None
     bandwidth_mhz: Optional[int] = None
+    throughput_mbps: Optional[float] = None  # actual data throughput, vs rate_mbps' PHY rate
     clients: list[RadioClient] = []
 
 
@@ -52,6 +53,7 @@ class RadioSnapshot(BaseModel):
     retries: Optional[float] = None
     channel: Optional[int] = None
     bandwidth_mhz: Optional[int] = None
+    throughput_mbps: Optional[float] = None
 
 
 class DeviceStatus(BaseModel):
@@ -74,6 +76,7 @@ class TelemetryPoint(BaseModel):
     retries: Optional[float] = None
     channel: Optional[int] = None
     bandwidth_mhz: Optional[int] = None
+    throughput_mbps: Optional[float] = None
 
 
 class RadioClientPoint(BaseModel):

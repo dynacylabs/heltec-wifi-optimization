@@ -98,6 +98,31 @@ delta_rate() {
     fi
 }
 
+# Actual data throughput in Mbit/s from a cumulative byte counter. Unlike
+# delta_rate (a request-count ratio), a byte count needs a real wall-clock
+# time base to become a rate, so this tracks elapsed seconds between polls
+# too rather than assuming a fixed interval.
+delta_throughput_mbps() {
+    key="$1"; cur_bytes="$2"
+    f="$STATE_DIR/$key"
+    now_ts="$(date +%s)"
+    prev_bytes=0; prev_ts=0
+    if [ -f "$f" ]; then
+        prev_bytes="$(cut -d' ' -f1 "$f" 2>/dev/null)"
+        prev_ts="$(cut -d' ' -f2 "$f" 2>/dev/null)"
+        [ -z "$prev_bytes" ] && prev_bytes=0
+        [ -z "$prev_ts" ] && prev_ts=0
+    fi
+    echo "$cur_bytes $now_ts" > "$f"
+    d_bytes=$((cur_bytes - prev_bytes))
+    d_secs=$((now_ts - prev_ts))
+    if [ "$d_bytes" -lt 0 ] || [ "$d_secs" -le 0 ]; then
+        echo 0
+    else
+        awk -v b="$d_bytes" -v s="$d_secs" 'BEGIN{printf "%.4f", (b*8)/(s*1000000)}'
+    fi
+}
+
 collect_halow() {
     ifname="$(halow_ifname)"
     [ -z "$ifname" ] && { echo '{"radio":"halow"}'; return; }
@@ -115,6 +140,8 @@ collect_halow() {
     rate_raw="$(echo "$assoc" | jsonfilter -e '@.results[0].tx.rate' 2>/dev/null)"
     retries_cum="$(echo "$assoc" | jsonfilter -e '@.results[0].tx.retries' 2>/dev/null)"
     packets_cum="$(echo "$assoc" | jsonfilter -e '@.results[0].tx.packets' 2>/dev/null)"
+    tx_bytes_cum="$(echo "$assoc" | jsonfilter -e '@.results[0].tx.bytes' 2>/dev/null)"
+    rx_bytes_cum="$(echo "$assoc" | jsonfilter -e '@.results[0].rx.bytes' 2>/dev/null)"
 
     rate_mbps=""
     [ -n "$rate_raw" ] && rate_mbps="$(awk -v r="$rate_raw" 'BEGIN{printf "%.2f", r/1000}')"
@@ -124,12 +151,22 @@ collect_halow() {
         retry_rate="$(delta_rate "halow-retries" "$retries_cum" "$packets_cum")"
     fi
 
+    # Actual data throughput (both directions combined), as opposed to
+    # rate_mbps above which is just the negotiated PHY link rate - the
+    # optimizer's bandwidth widen/narrow decision needs to compare real
+    # demand against capacity, not just know what the radio is capable of.
+    throughput_mbps=""
+    if [ -n "$tx_bytes_cum" ] && [ -n "$rx_bytes_cum" ]; then
+        total_bytes_cum=$((tx_bytes_cum + rx_bytes_cum))
+        throughput_mbps="$(delta_throughput_mbps "halow-throughput" "$total_bytes_cum")"
+    fi
+
     clients="[]"
     [ -n "$peer_mac" ] && clients="[{\"mac\":\"$peer_mac\",\"rssi\":$(jnum "$signal"),\"rate_mbps\":$(jnum "$rate_mbps")}]"
 
-    printf '{"radio":"halow","rssi":%s,"noise":%s,"mcs":%s,"rate_mbps":%s,"retries":%s,"channel":%s,"bandwidth_mhz":%s,"clients":%s}\n' \
+    printf '{"radio":"halow","rssi":%s,"noise":%s,"mcs":%s,"rate_mbps":%s,"retries":%s,"channel":%s,"bandwidth_mhz":%s,"throughput_mbps":%s,"clients":%s}\n' \
         "$(jnum "$signal")" "$(jnum "$noise")" "$(jnum "$mcs")" "$(jnum "$rate_mbps")" \
-        "$(jnum "$retry_rate")" "$(jnum "$channel")" "$(jnum "$bw_mhz")" "$clients"
+        "$(jnum "$retry_rate")" "$(jnum "$channel")" "$(jnum "$bw_mhz")" "$(jnum "$throughput_mbps")" "$clients"
 }
 
 collect_wifi24() {

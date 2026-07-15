@@ -204,11 +204,24 @@ Confirmed live via SSH against an HT-HD01-V2 AP/STA pair running OpenWrt
   cooldown. That's a real, working decision, just not a smart one - good
   enough to start accumulating real before/after data, which a smarter
   strategy would need anyway.
-- Bandwidth (widen/narrow) decisions aren't implemented at all yet - only
-  channel-within-current-bandwidth cycling. Doing this properly means
-  picking a channel from the *new* bandwidth's valid set, not just
-  changing the bandwidth number.
-- 2.4GHz (STA-side) channel selection is still fully stubbed - same
-  reasoning, no scan data to inform it yet.
+- 2.4GHz (STA-side) channel selection now works the same way: sustained
+  per-client retry degradation (`radio_clients.retries`, computed the same
+  delta-based way as HaLow) cycles through the standard non-overlapping
+  channels (1/6/11), round-robin.
+- Bandwidth (widen/narrow) decisions are implemented, but only evaluated
+  when the link is otherwise healthy (degradation always takes priority -
+  widening/narrowing a struggling link seems more likely to make things
+  worse than better). Utilization is real `throughput_mbps` (a new byte-
+  counter-delta metric, distinct from the PHY `rate_mbps` already
+  tracked) against the currently negotiated PHY rate - not a fixed
+  theoretical capacity table. Widen/narrow use much longer sustain windows
+  than a same-bandwidth channel cycle (60min / 24h respectively) since
+  they're more disruptive changes. **The specific thresholds (70%/10%
+  utilization, 60min/24h windows) are reasonable-sounding defaults, not
+  empirically validated against real traffic** - there's no meaningful
+  Blink/Shelly load on the bench to tune against yet. Revisit once real
+  usage data exists. The channel picked for the new bandwidth is also the
+  simplest possible choice (first valid channel), not frequency-proximity
+  aware.
 - TX power is intentionally not a lever (no battery/power constraint on
   this particular system — remove this line if that doesn't apply to you).
