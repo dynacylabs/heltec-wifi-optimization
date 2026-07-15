@@ -13,4 +13,12 @@ datasources:
       sslmode: disable
       postgresVersion: 1600
       timescaledb: true
+      # Required in addition to the top-level `database:` above - recent
+      # Grafana Postgres datasource plugin versions read the default
+      # database from here, not the legacy top-level field. Without this,
+      # queries fail at runtime with "you currently do not have a default
+      # database configured", even though the admin API/datasource test
+      # still show the (unused) legacy field as configured correctly -
+      # confirmed live, this is not a hypothetical.
+      database: $POSTGRES_DB
     isDefault: true
