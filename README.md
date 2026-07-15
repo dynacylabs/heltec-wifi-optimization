@@ -23,8 +23,12 @@ uncommitted edit, or maintain them in a private fork/branch.
 
 1. Clone this repo wherever you want to run it.
 2. Edit `docker-compose.yml` and replace every `changeme` with a real
-   password (`POSTGRES_PASSWORD` appears in three places and must match
+   value (`POSTGRES_PASSWORD` appears in three places and must match
    across all of them; `GF_SECURITY_ADMIN_PASSWORD` is independent).
+   Also set `API_TOKEN` on the `app` service — this is the shared secret
+   every device-facing endpoint requires (see "API authentication"
+   below) — and use the *same* value when configuring
+   `HOBOCAMS_API_TOKEN` in each device's `/etc/hobocams-agent.conf`.
 3. `docker compose up -d --build`
    - First boot runs `db/migrations/001_init.sql` automatically (Postgres
      only runs `/docker-entrypoint-initdb.d` on an empty data volume).
@@ -46,6 +50,23 @@ firmware (`wget`, `jsonfilter`, `ubus`, `uci`).
    and edit `HOBOCAMS_ROLE` (`AP` or `STA`) and `HOBOCAMS_SERVER_URL` for
    that specific device.
 4. `/etc/init.d/hobocams-agent enable && /etc/init.d/hobocams-agent start`
+
+## API authentication
+
+Every device-facing endpoint (`/telemetry`, `/commands/{mac}`,
+`/commands/{id}/report`) requires a `?token=` query parameter matching the
+server's `API_TOKEN` — a query param rather than an `Authorization` header,
+since the agent only has busybox `wget` on the device side, which has no
+`--header` support. `/health` is intentionally left open for plain
+uptime checks.
+
+This matters most if you put this server behind a reverse proxy reachable
+from the internet (e.g. because your Heltec devices sit on a network
+segment that can only reach the internet, not your LAN directly — in which
+case a public subdomain is the only path back to the server). In that
+case, don't put this endpoint behind an SSO/forward-auth layer (it has no
+login flow, it's a plain machine-to-machine API) — the token is the only
+protection, so treat it like a real secret.
 
 ## Validating the full loop before writing real rules
 

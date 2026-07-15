@@ -1,3 +1,5 @@
 .env
 pgdata/
 grafana-data/
+docker-compose.masha.yml
+__pycache__/

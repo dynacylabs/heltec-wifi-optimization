@@ -1,3 +1,4 @@
 # Copy to /etc/hobocams-agent.conf on each device and edit per-device.
 HOBOCAMS_ROLE=AP
 HOBOCAMS_SERVER_URL=http://masha.lan:8080
+HOBOCAMS_API_TOKEN=changeme

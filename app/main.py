@@ -3,9 +3,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Response
 
-from config import OPTIMIZER_INTERVAL_SECONDS
+from config import API_TOKEN, OPTIMIZER_INTERVAL_SECONDS
 from db import close_pool, get_pool
 from models import CommandOut, CommandReport, TelemetryReport
 from optimizer import run_optimizer_pass
@@ -29,6 +29,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="hobo-cams-brain", lifespan=lifespan)
 
 
+async def require_token(token: str):
+    # ?token= query param, not a header - see config.API_TOKEN for why.
+    if token != API_TOKEN:
+        raise HTTPException(401, "invalid token")
+
+
 async def _get_or_create_device(pool, mac: str, role: str | None, hostname: str | None):
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT id FROM devices WHERE mac = $1", mac)
@@ -47,7 +53,7 @@ async def _get_or_create_device(pool, mac: str, role: str | None, hostname: str 
         return row["id"]
 
 
-@app.post("/telemetry", status_code=204)
+@app.post("/telemetry", status_code=204, dependencies=[Depends(require_token)])
 async def post_telemetry(report: TelemetryReport):
     pool = await get_pool()
     device_id = await _get_or_create_device(pool, report.device_mac, report.role, report.hostname)
@@ -73,7 +79,7 @@ async def post_telemetry(report: TelemetryReport):
                     )
 
 
-@app.get("/commands/{device_mac}")
+@app.get("/commands/{device_mac}", dependencies=[Depends(require_token)])
 async def get_next_command(device_mac: str):
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -102,7 +108,7 @@ async def get_next_command(device_mac: str):
         )
 
 
-@app.post("/commands/{command_id}/report", status_code=204)
+@app.post("/commands/{command_id}/report", status_code=204, dependencies=[Depends(require_token)])
 async def report_command(command_id: int, report: CommandReport):
     pool = await get_pool()
     async with pool.acquire() as conn:

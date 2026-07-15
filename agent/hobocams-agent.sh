@@ -41,6 +41,7 @@
 
 : "${HOBOCAMS_SERVER_URL:?set HOBOCAMS_SERVER_URL, e.g. http://masha.lan:8080}"
 : "${HOBOCAMS_ROLE:?set HOBOCAMS_ROLE=AP or STA}"
+: "${HOBOCAMS_API_TOKEN:?set HOBOCAMS_API_TOKEN to the shared secret}"
 
 MAC="$(cat /sys/class/net/eth0/address)"
 DEVICE_HOSTNAME="$(uci get system.@system[0].hostname 2>/dev/null)"
@@ -151,7 +152,7 @@ post_telemetry() {
     halow_json="$(collect_halow)"
     wifi24_json="$(collect_wifi24)"
     payload="{\"device_mac\":\"$MAC\",\"hostname\":\"$DEVICE_HOSTNAME\",\"role\":\"$HOBOCAMS_ROLE\",\"radios\":[$halow_json,$wifi24_json]}"
-    wget -q -O /dev/null --post-data="$payload" "$HOBOCAMS_SERVER_URL/telemetry" 2>/dev/null
+    wget -q -O /dev/null --post-data="$payload" "$HOBOCAMS_SERVER_URL/telemetry?token=$HOBOCAMS_API_TOKEN" 2>/dev/null
 }
 
 apply_halow_operating_freq() {
@@ -173,7 +174,7 @@ apply_wifi24_channel() {
 }
 
 poll_and_apply_command() {
-    body="$(wget -q -O - "$HOBOCAMS_SERVER_URL/commands/$MAC" 2>/dev/null)"
+    body="$(wget -q -O - "$HOBOCAMS_SERVER_URL/commands/$MAC?token=$HOBOCAMS_API_TOKEN" 2>/dev/null)"
     [ -z "$body" ] && return 0
 
     command_id="$(echo "$body" | jsonfilter -e '@.command_id' 2>/dev/null)"
@@ -201,7 +202,7 @@ poll_and_apply_command() {
             ubus call uci confirm '{}'
             touch "$STATE_DIR/cmd-$command_id.acked"
             wget -q -O /dev/null --post-data='{"status":"acked"}' \
-                "$HOBOCAMS_SERVER_URL/commands/$command_id/report" 2>/dev/null
+                "$HOBOCAMS_SERVER_URL/commands/$command_id/report?token=$HOBOCAMS_API_TOKEN" 2>/dev/null
         fi
     ) &
 
@@ -209,7 +210,7 @@ poll_and_apply_command() {
         sleep "$((ttl_seconds + 15))"
         if [ ! -f "$STATE_DIR/cmd-$command_id.acked" ]; then
             wget -q -O /dev/null --post-data='{"status":"reverted","reason":"no ack within ttl_seconds"}' \
-                "$HOBOCAMS_SERVER_URL/commands/$command_id/report" 2>/dev/null
+                "$HOBOCAMS_SERVER_URL/commands/$command_id/report?token=$HOBOCAMS_API_TOKEN" 2>/dev/null
         fi
     ) &
 }
