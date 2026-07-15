@@ -3,7 +3,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from pydantic import BaseModel, ValidationError
 
 from config import API_TOKEN, OPTIMIZER_INTERVAL_SECONDS
 from db import close_pool, get_pool
@@ -35,6 +36,17 @@ async def require_token(token: str):
         raise HTTPException(401, "invalid token")
 
 
+async def parse_body(request: Request, model: type[BaseModel]):
+    # See post_telemetry's comment for why this bypasses FastAPI's automatic
+    # content-type-sensitive body parsing. Raises the same 422 shape FastAPI
+    # would have produced automatically, so callers get a normal error body
+    # instead of an unhandled 500 on malformed input.
+    try:
+        return model.model_validate_json(await request.body())
+    except ValidationError as e:
+        raise HTTPException(422, e.errors())
+
+
 async def _get_or_create_device(pool, mac: str, role: str | None, hostname: str | None):
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT id FROM devices WHERE mac = $1", mac)
@@ -54,7 +66,14 @@ async def _get_or_create_device(pool, mac: str, role: str | None, hostname: str 
 
 
 @app.post("/telemetry", status_code=204, dependencies=[Depends(require_token)])
-async def post_telemetry(report: TelemetryReport):
+async def post_telemetry(request: Request):
+    # Parse the body ourselves rather than declaring `report: TelemetryReport`
+    # directly - the OpenWrt agent's wget (uclient-fetch) always sends
+    # Content-Type: application/x-www-form-urlencoded for --post-data (no way
+    # to override it, no --header support), which FastAPI's automatic
+    # pydantic-body parsing rejects. model_validate_json parses the raw bytes
+    # unconditionally, regardless of Content-Type.
+    report = await parse_body(request, TelemetryReport)
     pool = await get_pool()
     device_id = await _get_or_create_device(pool, report.device_mac, report.role, report.hostname)
     now = datetime.now(timezone.utc)
@@ -109,7 +128,9 @@ async def get_next_command(device_mac: str):
 
 
 @app.post("/commands/{command_id}/report", status_code=204, dependencies=[Depends(require_token)])
-async def report_command(command_id: int, report: CommandReport):
+async def report_command(command_id: int, request: Request):
+    # See post_telemetry for why this parses the body manually.
+    report = await parse_body(request, CommandReport)
     pool = await get_pool()
     async with pool.acquire() as conn:
         cmd = await conn.fetchrow("SELECT id FROM commands WHERE id = $1", command_id)
