@@ -29,19 +29,6 @@
   }
   h1 { font-size: 20px; margin: 0 0 20px; }
   h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin: 32px 0 12px; }
-  #gate {
-    max-width: 400px; margin: 80px auto; text-align: center;
-  }
-  #gate input {
-    width: 100%; padding: 10px; margin-top: 12px; background: var(--panel); border: 1px solid var(--border);
-    color: var(--text); border-radius: 6px; font-size: 14px;
-  }
-  #gate button {
-    margin-top: 12px; padding: 10px 20px; background: var(--accent); border: none; border-radius: 6px;
-    color: #0d1117; font-weight: 600; cursor: pointer;
-  }
-  #gate .error { color: var(--red); margin-top: 8px; font-size: 13px; }
-  #app { display: none; }
   .cards { display: flex; gap: 16px; flex-wrap: wrap; }
   .card {
     background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
@@ -78,14 +65,6 @@
 </head>
 <body>
 
-<div id="gate">
-  <h1>HoboCams Status</h1>
-  <div>Enter the API token to continue.</div>
-  <input id="token-input" type="password" placeholder="API token">
-  <button onclick="submitToken()">Continue</button>
-  <div class="error" id="gate-error"></div>
-</div>
-
 <div id="app">
   <h1>HoboCams Status</h1>
 
@@ -110,8 +89,12 @@
 </div>
 
 <script>
-const TOKEN_KEY = "hobocams_dashboard_token";
-let TOKEN = localStorage.getItem(TOKEN_KEY);
+// Injected server-side (see main.py's /dashboard route) - access control
+// for a human happens at the reverse proxy (Authelia), not with this
+// token. It stays required on the API routes as defense in depth in case
+// this container is ever reachable through a path that isn't behind
+// Authelia (e.g. the open device API domain).
+const TOKEN = __API_TOKEN__;
 let selectedHours = 6;
 let charts = {};
 
@@ -120,22 +103,7 @@ function api(path) {
   return fetch(`${path}${sep}token=${encodeURIComponent(TOKEN)}`);
 }
 
-async function submitToken() {
-  const val = document.getElementById("token-input").value.trim();
-  if (!val) return;
-  const resp = await fetch(`/api/status?token=${encodeURIComponent(val)}`);
-  if (resp.status === 401) {
-    document.getElementById("gate-error").textContent = "Invalid token.";
-    return;
-  }
-  TOKEN = val;
-  localStorage.setItem(TOKEN_KEY, TOKEN);
-  showApp();
-}
-
 function showApp() {
-  document.getElementById("gate").style.display = "none";
-  document.getElementById("app").style.display = "block";
   initCharts();
   refreshAll();
   setInterval(refreshStatus, 15000);
@@ -157,7 +125,7 @@ function fmt(v, unit = "") {
 }
 
 async function refreshStatus() {
-  const resp = await api("/api/status");
+  const resp = await api(`/api/status?hours=${selectedHours}`);
   if (!resp.ok) return;
   const devices = await resp.json();
   const container = document.getElementById("status-cards");
@@ -175,6 +143,7 @@ async function refreshStatus() {
       </div>
       <div class="kv">
         <div class="k">Last seen</div><div class="v">${timeAgo(d.last_seen)}</div>
+        <div class="k">Uptime (${rangeLabel(selectedHours)})</div><div class="v">${d.uptime_pct != null ? d.uptime_pct.toFixed(1) + "%" : "—"}</div>
         <div class="k">HaLow channel</div><div class="v">${fmt(h.channel)}</div>
         <div class="k">HaLow bandwidth</div><div class="v">${fmt(h.bandwidth_mhz, " MHz")}</div>
         <div class="k">HaLow RSSI / Noise</div><div class="v">${fmt(h.rssi, " dBm")} / ${fmt(h.noise, " dBm")}</div>
@@ -186,6 +155,11 @@ async function refreshStatus() {
     `;
     container.appendChild(card);
   }
+}
+
+function rangeLabel(hours) {
+  if (hours < 24) return `${hours}h`;
+  return `${hours / 24}d`;
 }
 
 function chartOpts(yLabel) {
@@ -220,6 +194,7 @@ function initCharts() {
     e.target.classList.add("active");
     selectedHours = parseFloat(e.target.dataset.hours);
     refreshCharts();
+    refreshStatus(); // uptime % is computed over the same selected range
   });
 }
 
@@ -304,9 +279,7 @@ function refreshAll() {
   refreshCommands();
 }
 
-if (TOKEN) {
-  showApp();
-}
+showApp();
 </script>
 
 </body>

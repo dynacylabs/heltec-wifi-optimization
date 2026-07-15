@@ -1,10 +1,11 @@
+import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ValidationError
 
 from config import API_TOKEN, OPTIMIZER_INTERVAL_SECONDS
@@ -157,8 +158,48 @@ async def report_command(command_id: int, request: Request):
             )
 
 
+# Agent posts roughly every 30s; treat gaps beyond this as real downtime
+# rather than normal jitter between polls.
+EXPECTED_POLL_INTERVAL_SECONDS = 60
+
+
+async def _uptime_pct(conn, device_id: int, hours: float) -> float:
+    # Gap analysis over the halow stream as a heartbeat proxy (both radios
+    # get inserted together each cycle, so this represents "device was
+    # alive and posting" regardless of which radio you'd otherwise care
+    # about). Bookends the window with virtual readings at window start/now
+    # so an outage at the very start or still ongoing at "now" both count,
+    # not just gaps strictly between two real rows.
+    downtime_seconds = await conn.fetchval(
+        """
+        WITH bounds AS (
+            SELECT now() - ($2 || ' hours')::interval AS window_start, now() AS window_end
+        ),
+        readings AS (
+            SELECT time FROM telemetry
+            WHERE device_id = $1 AND radio = 'halow' AND time > (SELECT window_start FROM bounds)
+        ),
+        with_bounds AS (
+            SELECT window_start AS time FROM bounds
+            UNION ALL
+            SELECT time FROM readings
+            UNION ALL
+            SELECT window_end AS time FROM bounds
+        ),
+        gaps AS (
+            SELECT time, LAG(time) OVER (ORDER BY time) AS prev_time FROM with_bounds
+        )
+        SELECT COALESCE(SUM(GREATEST(EXTRACT(EPOCH FROM (time - prev_time)) - $3, 0)), 0)
+        FROM gaps WHERE prev_time IS NOT NULL
+        """,
+        device_id, str(hours), EXPECTED_POLL_INTERVAL_SECONDS,
+    )
+    window_seconds = hours * 3600
+    return max(0.0, min(100.0, 100.0 * (1 - float(downtime_seconds) / window_seconds)))
+
+
 @app.get("/api/status", response_model=list[DeviceStatus], dependencies=[Depends(require_token)])
-async def get_status():
+async def get_status(hours: float = Query(default=24, gt=0, le=24 * 30)):
     pool = await get_pool()
     async with pool.acquire() as conn:
         devices = await conn.fetch("SELECT id, mac, role, hostname, last_seen FROM devices ORDER BY role")
@@ -187,6 +228,7 @@ async def get_status():
                 """,
                 d["id"],
             )
+            uptime_pct = await _uptime_pct(conn, d["id"], hours)
             result.append(DeviceStatus(
                 mac=d["mac"],
                 role=d["role"],
@@ -195,6 +237,7 @@ async def get_status():
                 latest_halow=RadioSnapshot(**dict(halow)) if halow else None,
                 latest_wifi24=RadioSnapshot(**dict(wifi24)) if wifi24 else None,
                 wifi24_client_count=client_count or 0,
+                uptime_pct=uptime_pct,
             ))
         return result
 
@@ -238,7 +281,16 @@ async def get_command_history(limit: int = Query(default=50, gt=0, le=500)):
 
 @app.get("/dashboard")
 async def dashboard_page():
-    return FileResponse("static/dashboard.html")
+    # Injects the shared token server-side so the browser never has to
+    # prompt for or store it - access control for a human is expected to
+    # happen at the reverse proxy (Authelia), not here. The token itself
+    # stays required on the API routes regardless, as defense in depth
+    # against this same container also being reachable via the open,
+    # un-authelia'd device API domain.
+    with open("static/dashboard.html", encoding="utf-8") as f:
+        html = f.read()
+    html = html.replace("__API_TOKEN__", json.dumps(API_TOKEN))
+    return HTMLResponse(html)
 
 
 @app.get("/health")

@@ -61,6 +61,7 @@ class DeviceStatus(BaseModel):
     latest_halow: Optional[RadioSnapshot] = None
     latest_wifi24: Optional[RadioSnapshot] = None
     wifi24_client_count: int = 0
+    uptime_pct: Optional[float] = None  # over the requested window, see get_status
 
 
 class TelemetryPoint(BaseModel):
