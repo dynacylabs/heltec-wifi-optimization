@@ -1,22 +1,19 @@
 services:
   timescaledb:
     image: timescale/timescaledb:latest-pg16
-    container_name: hobocams-timescaledb
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-hobocams}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a password in .env}
       POSTGRES_DB: ${POSTGRES_DB:-hobocams}
     volumes:
-      - /Volumes/raid_usb/mounts/heltec-wifi-optimization/pgdata:/var/lib/postgresql/data
-      - /Volumes/raid_usb/mounts/heltec-wifi-optimization/db/migrations:/docker-entrypoint-initdb.d
+      - timescale_data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d
     ports:
       - "127.0.0.1:5432:5432"
 
   app:
-    image: hobocams-brain-app:latest
-    pull_policy: never
-    container_name: hobocams-app
+    build: ./app
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-hobocams}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB:-hobocams}
@@ -28,7 +25,6 @@ services:
 
   grafana:
     image: grafana/grafana:latest
-    container_name: hobocams-grafana
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set a password in .env}
@@ -36,9 +32,13 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-hobocams}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a password in .env}
     volumes:
-      - /Volumes/raid_usb/mounts/heltec-wifi-optimization/grafana-data:/var/lib/grafana
-      - /Volumes/raid_usb/mounts/heltec-wifi-optimization/grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
     depends_on:
       - timescaledb
     ports:
       - "3000:3000"
+
+volumes:
+  timescale_data:
+  grafana_data:

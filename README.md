@@ -1,52 +1,30 @@
-# hobo-cams-brain
+# heltec-wifi-optimization
 
-Central optimization server for the Hobo Cams HaLow bridge (AP `192.168.2.2` /
-STA `192.168.2.3`). Ingests telemetry from both Heltec HT-HD01-V2 devices,
-runs a rule-based optimizer, and pushes config changes back down with a
-self-reverting safety mechanism that lives on the device, not the server.
+Central optimization server for a Heltec HT-HD01-V2 Wi-Fi HaLow point-to-point
+bridge (one AP, one STA). Ingests telemetry from both devices, runs a
+rule-based optimizer, and pushes config changes back down with a
+self-reverting safety mechanism that lives on the device, not the server —
+so a bad change can't permanently sever the link.
 
-## Deploying the server (on masha)
+## Requirements
 
-masha deploys everything as a **Portainer stack**, not raw `docker compose`
-CLI, with data under `/Volumes/raid_usb/mounts/` so restic backs it up
-nightly — this project follows that convention, not a generic
-docker-compose layout. (Also intentionally staying off NPM/Authelia for
-now — internal tool, reachable directly by host port on the LAN, not a
-public subdomain. Revisit if it ever needs family-facing access.)
+- Two Heltec HT-HD01-V2 dongles, factory reset, paired, firmware 2.8.5 or
+  later (OpenWrt-based), one in AP mode and one in STA mode, both reachable
+  over Ethernet from wherever you run this server.
+- Docker + Docker Compose on the server.
+- SSH (root) access to both Heltec devices, for deploying the agent script.
 
-1. **Clone the repo** into the mounts dir (same pattern as
-   `blinkbridge`/`jumpbox` - code + config living together). `git clone`
-   requires the target to be empty, so this must happen *before* creating
-   any data dirs inside it:
-   ```bash
-   git clone git@github.com:dynacylabs/heltec-wifi-optimization.git \
-     /Volumes/raid_usb/mounts/heltec-wifi-optimization
-   ```
-2. **Bind mount dirs** (Checklist step 1 in MASHA.md) - created as
-   siblings of the cloned repo's files, after cloning:
-   ```bash
-   mkdir -p /Volumes/raid_usb/mounts/heltec-wifi-optimization/pgdata
-   mkdir -p /Volumes/raid_usb/mounts/heltec-wifi-optimization/grafana-data
-   ```
-3. **Build the app image** (locally built, like Blinkbridge/jumpbox/resume
-   — Portainer stacks here reference a pre-built tag, not a `build:`
-   context):
-   ```bash
-   cd /Volumes/raid_usb/mounts/heltec-wifi-optimization/app
-   docker build -t hobocams-brain-app:latest .
-   ```
-4. **Deploy via Portainer:** Stacks → Add Stack → name `hobocams` → paste
-   the contents of `docker-compose.yml` → fill in `POSTGRES_PASSWORD` and
-   `GRAFANA_ADMIN_PASSWORD` as environment variables in the Portainer UI
-   (or use `.env.example` as a reference for what's needed) → Deploy.
-5. Check `http://masha:8080/health` returns `{"status": "ok"}`.
-6. Grafana at `http://masha:3000` (login `admin` / whatever you set for
-   `GRAFANA_ADMIN_PASSWORD`) — the TimescaleDB datasource and a starter
-   "HoboCams Overview" dashboard are already provisioned.
+## Deploying the server
 
-Don't add this to the Running Services table / Authelia / NPM yet per the
-MASHA.md new-service checklist — those steps are for services that need a
-public subdomain, which this doesn't (yet).
+1. Clone this repo wherever you want to run it.
+2. `cp .env.example .env` and fill in real passwords.
+3. `docker compose up -d --build`
+   - First boot runs `db/migrations/001_init.sql` automatically (Postgres
+     only runs `/docker-entrypoint-initdb.d` on an empty data volume).
+4. Check `http://<host>:8080/health` returns `{"status": "ok"}`.
+5. Grafana at `http://<host>:3000` (login `admin` / `GRAFANA_ADMIN_PASSWORD`
+   from `.env`) — the TimescaleDB datasource and a starter "HoboCams
+   Overview" dashboard are already provisioned.
 
 ## Deploying the agent (on each Heltec device)
 
@@ -69,10 +47,10 @@ the telemetry → command → apply → rollback/ack path actually works
 end-to-end, inject a test command by hand rather than waiting for real
 rule logic:
 
-1. Confirm telemetry is landing: `docker exec -it hobocams-timescaledb
-   psql -U hobocams -c "select * from devices;"` — both AP and STA should
-   show up with a recent `last_seen` within ~30-60s of starting their
-   agents.
+1. Confirm telemetry is landing:
+   `docker compose exec timescaledb psql -U hobocams -c "select * from devices;"`
+   — both AP and STA should show up with a recent `last_seen` within
+   ~30-60s of starting their agents.
 2. Grab the AP's device id from that query, then insert a deliberately
    *safe* test command (a channel it's already on, so there's nothing to
    actually break) to prove the mechanics:
@@ -87,35 +65,40 @@ rule logic:
    `acked`.
 4. Then try a real (but still recoverable) channel change to prove the
    rollback side works too — same insert with a different valid channel,
-   and confirm the STA reassociates within its usual ~30s.
+   and confirm the STA reassociates (typically well under a minute).
 
-Only once this is proven, move on to Task #13 (real channel-plan/scan
-logic) so the optimizer can issue these commands itself instead of us
+Only once this is proven, move on to real channel-plan/scan logic (see
+Known Gaps) so the optimizer can issue these commands itself instead of
 hand-inserting them.
 
-## Verified against real hardware (2026-07-15, SSH on 192.168.2.2 / .3)
+## Verified against real hardware
+
+Confirmed live via SSH against an HT-HD01-V2 AP/STA pair running OpenWrt
+23.05.5 / vendor firmware 2.8.5-20250924:
 
 - HaLow radio interface: `wlan0` on both AP and STA (phy1, Morse Micro
-  MM6108A1). STA's 2.4GHz radio interface: `phy0-ap0` (phy0, MediaTek
-  MT7628) — looked up dynamically via `ubus call network.wireless status`,
-  not hardcoded.
+  MM6108A1). The 2.4GHz radio interface name isn't guaranteed the same on
+  every unit/role (e.g. `phy0-ap0` was seen on one STA) — the agent looks
+  it up dynamically via `ubus call network.wireless status` rather than
+  hardcoding it.
 - No `curl` on this firmware, only busybox `wget` (supports `--post-data`,
   no `--header` — fine, since FastAPI doesn't require Content-Type to parse
   a JSON body).
 - `collect_halow()` / `collect_wifi24()` use `ubus call iwinfo info` /
   `assoclist` (clean JSON) plus `ubus call rangetest morse_cli_channel` for
   exact HaLow bandwidth. Live-tested on both devices — confirmed producing
-  correct output (e.g. AP saw `rssi:-1, noise:-76, mcs:7, rate_mbps:15.48,
-  retries:0.062, channel:8, bandwidth_mhz:4`).
+  correct output (e.g. one AP saw `rssi:-1, noise:-76, mcs:7,
+  rate_mbps:15.48, retries:0.062, channel:8, bandwidth_mhz:4`).
 - The device's retry/packet counters are cumulative since boot, not a live
-  rate — `delta_rate()` computes the actual per-interval fraction between
-  polls. This was a real bug in the original schema (`retries` was
-  `INTEGER`, now `DOUBLE PRECISION`) caught by testing against the device.
+  rate — `delta_rate()` in the agent computes the actual per-interval
+  fraction between polls. This was a real bug caught by testing against
+  real hardware: the schema originally had `retries` as `INTEGER`; it's
+  `DOUBLE PRECISION` now, since it's a fraction.
 - `apply_halow_operating_freq()` sets `wireless.radio1.channel` — HaLow
   bandwidth turned out to be implied by the channel index itself (no
-  separate uci width option exists; LuCI's "Width" field is UI sugar over
-  a custom widget that just picks a channel number from a bandwidth-aware
-  channel plan).
+  separate uci width option exists; LuCI's "Width" field in the vendor web
+  UI is sugar over a custom widget that just picks a channel number from a
+  bandwidth-aware channel plan).
 - Safe-apply uses OpenWrt's native `ubus call uci apply {rollback, timeout}`
   + `uci confirm`/`rollback` — the same mechanism behind LuCI's own "Save &
   Apply" countdown — instead of a hand-rolled config snapshot.
@@ -124,11 +107,12 @@ hand-inserting them.
 
 - Real channel-scan telemetry isn't available: `iwinfo scan` on the HaLow
   device returned an empty result set live. The optimizer still only
-  detects/logs sustained degradation rather than auto-selecting a channel —
-  see Task "Research HaLow channel-plan-to-bandwidth mapping."
+  detects/logs sustained degradation rather than auto-selecting a channel.
+  Also unresolved: the actual channel-plan mapping (which channel indices
+  correspond to which bandwidths) needed to translate "widen to N MHz"
+  into a concrete channel number.
 - The `uci apply` rollback mechanism itself hasn't been live-tested end to
-  end by our agent specifically (as opposed to a manual channel change via
-  LuCI, which has been tested extensively) — see Task "Live-test the uci
-  apply rollback safe-apply mechanism."
+  end by the agent specifically (as opposed to a manual channel change via
+  the vendor web UI, which has been tested extensively).
 - TX power is intentionally not a lever (no battery/power constraint on
-  this system, per project scope).
+  this particular system — remove this line if that doesn't apply to you).
