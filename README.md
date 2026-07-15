@@ -174,18 +174,41 @@ Confirmed live via SSH against an HT-HD01-V2 AP/STA pair running OpenWrt
   bandwidth-aware channel plan).
 - Safe-apply uses OpenWrt's native `ubus call uci apply {rollback, timeout}`
   + `uci confirm`/`rollback` — the same mechanism behind LuCI's own "Save &
-  Apply" countdown — instead of a hand-rolled config snapshot.
+  Apply" countdown — instead of a hand-rolled config snapshot. **Confirmed
+  live this is not sufficient on its own**: it does not reliably push a
+  wireless change to the radio - an explicit `ubus call network.wireless
+  reconf` is required afterward, and even then an invalid channel/bandwidth
+  combination is silently ignored by the driver rather than erroring. The
+  agent now reads the live channel back and compares it to the target
+  before ever calling `uci confirm`; a mismatch reports `reverted`
+  immediately with a real reason instead of relying on a generic ttl
+  timeout. A live test (channel 8→12 while at 4MHz bandwidth) reproduced
+  exactly this failure mode and confirmed the fix catches it correctly,
+  with the radio never actually disrupted either time.
+- The real US HaLow channel-plan (`app/halow_channel_plan.py`) is sourced
+  directly from `/usr/share/morse-regdb/channels.csv` on the device
+  (package `morse-regdb`, confirmed live) - not guessed, not derived from
+  public docs. Channel numbering is bandwidth-dependent and the valid
+  channel sets per bandwidth don't overlap (e.g. channel 12 is only valid
+  at 8MHz; at 4MHz the valid set is 8/16/24/32/40/48) - this is exactly
+  what caused the silent-failure bug above.
 
 ## Known gaps (see task list, not oversights)
 
-- Real channel-scan telemetry isn't available: `iwinfo scan` on the HaLow
-  device returned an empty result set live. The optimizer still only
-  detects/logs sustained degradation rather than auto-selecting a channel.
-  Also unresolved: the actual channel-plan mapping (which channel indices
-  correspond to which bandwidths) needed to translate "widen to N MHz"
-  into a concrete channel number.
-- The `uci apply` rollback mechanism itself hasn't been live-tested end to
-  end by the agent specifically (as opposed to a manual channel change via
-  the vendor web UI, which has been tested extensively).
+- The optimizer's HaLow channel selection (`app/optimizer.py`) is
+  deliberately simple, not scan-informed: real channel-scan telemetry
+  isn't available (`iwinfo scan` returns empty on this driver, confirmed
+  live), so rather than invent a scoring heuristic on data that doesn't
+  exist, it just cycles to the next valid channel *at the same bandwidth*
+  in a fixed round-robin order when degradation is sustained past
+  cooldown. That's a real, working decision, just not a smart one - good
+  enough to start accumulating real before/after data, which a smarter
+  strategy would need anyway.
+- Bandwidth (widen/narrow) decisions aren't implemented at all yet - only
+  channel-within-current-bandwidth cycling. Doing this properly means
+  picking a channel from the *new* bandwidth's valid set, not just
+  changing the bandwidth number.
+- 2.4GHz (STA-side) channel selection is still fully stubbed - same
+  reasoning, no scan data to inform it yet.
 - TX power is intentionally not a lever (no battery/power constraint on
   this particular system — remove this line if that doesn't apply to you).
