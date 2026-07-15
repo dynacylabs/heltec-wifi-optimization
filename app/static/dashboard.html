@@ -41,8 +41,10 @@
   .kv { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font-size: 13px; }
   .kv div.k { color: var(--muted); }
   .kv div.v { text-align: right; font-variant-numeric: tabular-nums; }
-  .charts { display: flex; flex-direction: column; gap: 24px; }
-  .chart-box { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; height: 260px; }
+  .charts { display: flex; flex-direction: column; gap: 28px; }
+  .chart-box { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; height: 340px; display: flex; flex-direction: column; }
+  .chart-help { font-size: 12px; color: var(--muted); margin-bottom: 10px; line-height: 1.4; }
+  .chart-box canvas { flex: 1; min-height: 0; }
   .range-picker { display: flex; gap: 6px; margin-bottom: 16px; }
   .range-picker button {
     background: var(--panel); border: 1px solid var(--border); color: var(--text);
@@ -79,9 +81,18 @@
     <button data-hours="168">7d</button>
   </div>
   <div class="charts">
-    <div class="chart-box"><canvas id="chart-rssi"></canvas></div>
-    <div class="chart-box"><canvas id="chart-retries"></canvas></div>
-    <div class="chart-box"><canvas id="chart-bandwidth"></canvas></div>
+    <div class="chart-box">
+      <div class="chart-help">RSSI (solid) is received signal strength - closer to 0 is stronger. Noise (dashed) is the background floor at that end. What actually matters is the <em>gap</em> between them (signal-to-noise ratio) - a bigger gap means more margin before the link starts degrading. A wide gap now is expected on a bench; expect it to shrink once deployed at real range.</div>
+      <canvas id="chart-rssi"></canvas>
+    </div>
+    <div class="chart-box">
+      <div class="chart-help">Fraction of frames that needed at least one retransmission. Occasional small spikes are normal (interference blips). A sustained climb is the real warning sign - it's literally what the optimizer's degradation detector watches for (currently: sustained average above 15%).</div>
+      <canvas id="chart-retries"></canvas>
+    </div>
+    <div class="chart-box">
+      <div class="chart-help">Current HaLow channel width in MHz. This is a step chart - it only moves when a config change actually happens, so a flat line just means nothing's been changed yet (expected until the rule-based optimizer is built and starts issuing commands).</div>
+      <canvas id="chart-bandwidth"></canvas>
+    </div>
   </div>
 
   <h2>Command History</h2>
@@ -171,10 +182,18 @@ function chartOpts(yLabel) {
       maintainAspectRatio: false,
       animation: false,
       scales: {
-        x: { type: "time", ticks: { color: "#8b949e" }, grid: { color: "#30363d" } },
+        x: {
+          type: "time",
+          ticks: { color: "#8b949e", autoSkip: true, maxTicksLimit: 8, maxRotation: 0 },
+          grid: { color: "#30363d" },
+        },
         y: { title: { display: true, text: yLabel, color: "#8b949e" }, ticks: { color: "#8b949e" }, grid: { color: "#30363d" } },
       },
-      plugins: { legend: { labels: { color: "#c9d1d9" } } },
+      plugins: {
+        legend: { labels: { color: "#c9d1d9" } },
+        tooltip: { mode: "index", intersect: false },
+      },
+      interaction: { mode: "index", intersect: false },
     },
   };
 }
