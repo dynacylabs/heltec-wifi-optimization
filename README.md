@@ -104,6 +104,20 @@ hand-inserting them.
 Confirmed live via SSH against an HT-HD01-V2 AP/STA pair running OpenWrt
 23.05.5 / vendor firmware 2.8.5-20250924:
 
+- **The agent's `wget` (`uclient-fetch`) always sends
+  `Content-Type: application/x-www-form-urlencoded` for `--post-data`, with
+  no way to override it (no `--header` support).** FastAPI's automatic
+  pydantic-body parsing (`async def endpoint(report: SomeModel)`) rejects
+  this even though the JSON payload itself arrives byte-for-byte intact —
+  confirmed via a local FastAPI instance that the exact same payload
+  succeeds with `Content-Type: application/json` and fails with this one,
+  producing a `model_attributes_type` / "Input should be a valid dictionary"
+  422 with the whole payload double-quoted in `input`. Every POST endpoint
+  here parses the raw body itself via `model.model_validate_json(await
+  request.body())` instead, which is content-type-agnostic. If you see this
+  exact error shape from a client that isn't a browser/curl, check its
+  Content-Type header first.
+
 - HaLow radio interface: `wlan0` on both AP and STA (phy1, Morse Micro
   MM6108A1). The 2.4GHz radio interface name isn't guaranteed the same on
   every unit/role (e.g. `phy0-ap0` was seen on one STA) — the agent looks
