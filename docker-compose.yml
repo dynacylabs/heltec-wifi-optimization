@@ -11,6 +11,8 @@ services:
       - ./db/migrations:/docker-entrypoint-initdb.d
     ports:
       - "127.0.0.1:5432:5432"
+    networks:
+      - internal
 
   app:
     build: ./app
@@ -22,6 +24,8 @@ services:
       - timescaledb
     ports:
       - "8080:8080"
+    networks:
+      - internal
 
   grafana:
     image: grafana/grafana:latest
@@ -38,6 +42,11 @@ services:
       - timescaledb
     ports:
       - "3000:3000"
+    networks:
+      - internal
+
+networks:
+  internal:
 
 volumes:
   timescale_data:
