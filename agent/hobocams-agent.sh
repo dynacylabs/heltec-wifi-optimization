@@ -38,6 +38,19 @@
 #     hand-rolled config snapshot, since it's a tested, built-in feature
 #     that survives more failure modes (e.g. a crash mid-window) than a
 #     shell-script-level snapshot would.
+#   - IMPORTANT, confirmed live: `uci apply` alone does NOT reliably push a
+#     wireless config change to the radio - an explicit
+#     `ubus call network.wireless reconf` is still required afterward.
+#   - ALSO confirmed live: an invalid channel/bandwidth combination (HaLow
+#     channel numbering is bandwidth-dependent, and the valid combinations
+#     aren't fully mapped yet - see Task "Research HaLow channel-plan")
+#     fails SILENTLY - the uci config commits fine and reconf returns no
+#     error, but the radio just keeps running its last-good state. This is
+#     why poll_and_apply_command reads the live value back and compares it
+#     to the target before ever calling `uci confirm` - reachability alone
+#     (the AP staying up over Ethernet) proves nothing about whether the
+#     HaLow radio itself actually changed, since that path doesn't go
+#     through HaLow at all.
 
 : "${HOBOCAMS_SERVER_URL:?set HOBOCAMS_SERVER_URL, e.g. http://masha.lan:8080}"
 : "${HOBOCAMS_ROLE:?set HOBOCAMS_ROLE=AP or STA}"
@@ -173,6 +186,23 @@ apply_wifi24_channel() {
     uci commit wireless
 }
 
+# Reads the live radio state back and compares it to what the command
+# actually asked for. uci committing successfully and `reconf` returning
+# without error prove nothing on their own - confirmed live, an invalid
+# channel/bandwidth combination is silently ignored by the driver.
+verify_command_applied() {
+    # $1 = param, $2 = target_value JSON
+    case "$1" in
+        halow_operating_freq) ifname="$(halow_ifname)" ;;
+        wifi24_channel) ifname="$(wifi24_ifname)" ;;
+        *) return 1 ;;
+    esac
+    [ -z "$ifname" ] && return 1
+    target_channel="$(echo "$2" | jsonfilter -e '@.channel' 2>/dev/null)"
+    live_channel="$(ubus call iwinfo info "{\"device\":\"$ifname\"}" 2>/dev/null | jsonfilter -e '@.channel' 2>/dev/null)"
+    [ -n "$live_channel" ] && [ "$live_channel" = "$target_channel" ]
+}
+
 poll_and_apply_command() {
     body="$(wget -q -O - "$HOBOCAMS_SERVER_URL/commands/$MAC?token=$HOBOCAMS_API_TOKEN" 2>/dev/null)"
     [ -z "$body" ] && return 0
@@ -189,26 +219,40 @@ poll_and_apply_command() {
         *) echo "unknown param $param" >&2; return 1 ;;
     esac
 
-    rm -f "$STATE_DIR/cmd-$command_id.acked"
+    rm -f "$STATE_DIR/cmd-$command_id.reported"
 
     # Native OpenWrt safe-apply: stages the uci commit above for real, with
     # an automatic rollback if not confirmed within ttl_seconds - the same
-    # mechanism LuCI's own "Save & Apply" countdown uses.
+    # mechanism LuCI's own "Save & Apply" countdown uses. Confirmed live
+    # that this alone does not push the change to the radio - reconf is
+    # still required (see header note).
     ubus call uci apply "{\"rollback\":true,\"timeout\":$ttl_seconds}"
+    ubus call network.wireless reconf
 
     (
-        sleep 20
-        if [ -n "$(wget -q -O - "$HOBOCAMS_SERVER_URL/health" 2>/dev/null)" ]; then
-            ubus call uci confirm '{}'
-            touch "$STATE_DIR/cmd-$command_id.acked"
-            wget -q -O /dev/null --post-data='{"status":"acked"}' \
+        sleep 25
+        if verify_command_applied "$param" "$target_value"; then
+            if [ -n "$(wget -q -O - "$HOBOCAMS_SERVER_URL/health" 2>/dev/null)" ]; then
+                ubus call uci confirm '{}'
+                touch "$STATE_DIR/cmd-$command_id.reported"
+                wget -q -O /dev/null --post-data='{"status":"acked"}' \
+                    "$HOBOCAMS_SERVER_URL/commands/$command_id/report?token=$HOBOCAMS_API_TOKEN" 2>/dev/null
+            fi
+        else
+            # Config committed but the radio never actually reached the
+            # target state - not safe to confirm. Let uci's own rollback
+            # timer revert it, and report the real reason now rather than
+            # waiting out the full ttl_seconds and reporting a generic
+            # timeout.
+            touch "$STATE_DIR/cmd-$command_id.reported"
+            wget -q -O /dev/null --post-data='{"status":"reverted","reason":"target value not reached after apply"}' \
                 "$HOBOCAMS_SERVER_URL/commands/$command_id/report?token=$HOBOCAMS_API_TOKEN" 2>/dev/null
         fi
     ) &
 
     (
         sleep "$((ttl_seconds + 15))"
-        if [ ! -f "$STATE_DIR/cmd-$command_id.acked" ]; then
+        if [ ! -f "$STATE_DIR/cmd-$command_id.reported" ]; then
             wget -q -O /dev/null --post-data='{"status":"reverted","reason":"no ack within ttl_seconds"}' \
                 "$HOBOCAMS_SERVER_URL/commands/$command_id/report?token=$HOBOCAMS_API_TOKEN" 2>/dev/null
         fi
