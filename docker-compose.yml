@@ -8,8 +8,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a password in .env}
       POSTGRES_DB: ${POSTGRES_DB:-hobocams}
     volumes:
-      - /Volumes/raid_usb/mounts/hobocams/pgdata:/var/lib/postgresql/data
-      - /Volumes/raid_usb/mounts/hobocams/db/migrations:/docker-entrypoint-initdb.d
+      - /Volumes/raid_usb/mounts/heltec-wifi-optimization/pgdata:/var/lib/postgresql/data
+      - /Volumes/raid_usb/mounts/heltec-wifi-optimization/db/migrations:/docker-entrypoint-initdb.d
     ports:
       - "127.0.0.1:5432:5432"
 
@@ -36,8 +36,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-hobocams}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a password in .env}
     volumes:
-      - /Volumes/raid_usb/mounts/hobocams/grafana-data:/var/lib/grafana
-      - /Volumes/raid_usb/mounts/hobocams/grafana/provisioning:/etc/grafana/provisioning
+      - /Volumes/raid_usb/mounts/heltec-wifi-optimization/grafana-data:/var/lib/grafana
+      - /Volumes/raid_usb/mounts/heltec-wifi-optimization/grafana/provisioning:/etc/grafana/provisioning
     depends_on:
       - timescaledb
     ports:

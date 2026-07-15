@@ -14,19 +14,25 @@ docker-compose layout. (Also intentionally staying off NPM/Authelia for
 now — internal tool, reachable directly by host port on the LAN, not a
 public subdomain. Revisit if it ever needs family-facing access.)
 
-1. **Bind mount dirs** (Checklist step 1 in MASHA.md):
+1. **Clone the repo** into the mounts dir (same pattern as
+   `blinkbridge`/`jumpbox` - code + config living together). `git clone`
+   requires the target to be empty, so this must happen *before* creating
+   any data dirs inside it:
    ```bash
-   mkdir -p /Volumes/raid_usb/mounts/hobocams/pgdata
-   mkdir -p /Volumes/raid_usb/mounts/hobocams/grafana-data
+   git clone git@github.com:dynacylabs/heltec-wifi-optimization.git \
+     /Volumes/raid_usb/mounts/heltec-wifi-optimization
    ```
-2. **Copy this whole `hobo-cams-brain/` directory** to
-   `/Volumes/raid_usb/mounts/hobocams/` on masha (code + config living
-   together, same pattern as `blinkbridge`/`jumpbox`/`resume`).
+2. **Bind mount dirs** (Checklist step 1 in MASHA.md) - created as
+   siblings of the cloned repo's files, after cloning:
+   ```bash
+   mkdir -p /Volumes/raid_usb/mounts/heltec-wifi-optimization/pgdata
+   mkdir -p /Volumes/raid_usb/mounts/heltec-wifi-optimization/grafana-data
+   ```
 3. **Build the app image** (locally built, like Blinkbridge/jumpbox/resume
    — Portainer stacks here reference a pre-built tag, not a `build:`
    context):
    ```bash
-   cd /Volumes/raid_usb/mounts/hobocams/app
+   cd /Volumes/raid_usb/mounts/heltec-wifi-optimization/app
    docker build -t hobocams-brain-app:latest .
    ```
 4. **Deploy via Portainer:** Stacks → Add Stack → name `hobocams` → paste
