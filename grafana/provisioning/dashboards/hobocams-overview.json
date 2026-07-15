@@ -1,0 +1,53 @@
+{
+  "title": "HoboCams Overview",
+  "uid": "hobocams-overview",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "HaLow RSSI / Noise (dBm)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "hobocams-timescale" },
+      "targets": [
+        {
+          "rawSql": "SELECT time AS \"time\", rssi, noise FROM telemetry t JOIN devices d ON d.id = t.device_id WHERE t.radio = 'halow' AND d.role = 'AP' AND $__timeFilter(time) ORDER BY time",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "HaLow Retries",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "hobocams-timescale" },
+      "targets": [
+        {
+          "rawSql": "SELECT time AS \"time\", retries FROM telemetry t JOIN devices d ON d.id = t.device_id WHERE t.radio = 'halow' AND d.role = 'AP' AND $__timeFilter(time) ORDER BY time",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "2.4GHz Client RSSI",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "datasource": { "type": "postgres", "uid": "hobocams-timescale" },
+      "targets": [
+        {
+          "rawSql": "SELECT time AS \"time\", client_mac, rssi FROM radio_clients WHERE radio = 'wifi24' AND $__timeFilter(time) ORDER BY time",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

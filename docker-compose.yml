@@ -1,0 +1,44 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: hobocams-timescaledb
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hobocams}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a password in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-hobocams}
+    volumes:
+      - /Volumes/raid_usb/mounts/hobocams/pgdata:/var/lib/postgresql/data
+      - /Volumes/raid_usb/mounts/hobocams/db/migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  app:
+    image: hobocams-brain-app:latest
+    pull_policy: never
+    container_name: hobocams-app
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-hobocams}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB:-hobocams}
+      OPTIMIZER_INTERVAL_SECONDS: ${OPTIMIZER_INTERVAL_SECONDS:-300}
+    depends_on:
+      - timescaledb
+    ports:
+      - "8080:8080"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: hobocams-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set a password in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-hobocams}
+      POSTGRES_USER: ${POSTGRES_USER:-hobocams}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a password in .env}
+    volumes:
+      - /Volumes/raid_usb/mounts/hobocams/grafana-data:/var/lib/grafana
+      - /Volumes/raid_usb/mounts/hobocams/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - timescaledb
+    ports:
+      - "3000:3000"
