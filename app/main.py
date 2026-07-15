@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, ValidationError
 
 from config import API_TOKEN, OPTIMIZER_INTERVAL_SECONDS
@@ -277,6 +277,11 @@ async def get_command_history(limit: int = Query(default=50, gt=0, le=500)):
             limit,
         )
         return [CommandHistoryEntry(**dict(r)) for r in rows]
+
+
+@app.get("/")
+async def root():
+    return RedirectResponse("/dashboard")
 
 
 @app.get("/dashboard")
