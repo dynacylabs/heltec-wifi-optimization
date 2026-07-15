@@ -35,7 +35,23 @@ uncommitted edit, or maintain them in a private fork/branch.
 4. Check `http://<host>:8080/health` returns `{"status": "ok"}`.
 5. Grafana at `http://<host>:3000` (login `admin` / whatever you set for
    `GF_SECURITY_ADMIN_PASSWORD`) — the TimescaleDB datasource and a starter
-   "HoboCams Overview" dashboard are already provisioned.
+   "HoboCams Overview" dashboard are already provisioned. Optional — see
+   the built-in status page below for day-to-day troubleshooting instead.
+
+## Status page
+
+`http://<host>:8080/dashboard` is a self-contained status page (no Grafana
+knowledge required) served directly by the app — live device status
+(online/offline, current channel/RSSI/noise/bandwidth per radio),
+scalable-time-range HaLow history charts, and a command history table
+(what was attempted, target value, and whether it was kept: pending →
+applied → acked/reverted/expired). First visit prompts for the API token
+(same one from `API_TOKEN`/`HOBOCAMS_API_TOKEN`), stored in the browser's
+`localStorage` afterward. It's backed by three read endpoints
+(`/api/status`, `/api/telemetry/{mac}`, `/api/commands`) protected by the
+same token as the device-facing endpoints — no separate secret to manage.
+Uptime is a simple online/offline indicator based on how recently a
+device last reported in, not a historical uptime-percentage tracker.
 
 ## Deploying the agent (on each Heltec device)
 

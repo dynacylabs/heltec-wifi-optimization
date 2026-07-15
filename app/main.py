@@ -3,12 +3,21 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ValidationError
 
 from config import API_TOKEN, OPTIMIZER_INTERVAL_SECONDS
 from db import close_pool, get_pool
-from models import CommandOut, CommandReport, TelemetryReport
+from models import (
+    CommandHistoryEntry,
+    CommandOut,
+    CommandReport,
+    DeviceStatus,
+    RadioSnapshot,
+    TelemetryPoint,
+    TelemetryReport,
+)
 from optimizer import run_optimizer_pass
 
 logging.basicConfig(level=logging.INFO)
@@ -146,6 +155,90 @@ async def report_command(command_id: int, request: Request):
                 "UPDATE commands SET status = $2, reason = $3 WHERE id = $1",
                 command_id, report.status, report.reason,
             )
+
+
+@app.get("/api/status", response_model=list[DeviceStatus], dependencies=[Depends(require_token)])
+async def get_status():
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        devices = await conn.fetch("SELECT id, mac, role, hostname, last_seen FROM devices ORDER BY role")
+        result = []
+        for d in devices:
+            halow = await conn.fetchrow(
+                """
+                SELECT time, rssi, noise, mcs, rate_mbps, retries, channel, bandwidth_mhz
+                FROM telemetry WHERE device_id = $1 AND radio = 'halow'
+                ORDER BY time DESC LIMIT 1
+                """,
+                d["id"],
+            )
+            wifi24 = await conn.fetchrow(
+                """
+                SELECT time, rssi, noise, mcs, rate_mbps, retries, channel, bandwidth_mhz
+                FROM telemetry WHERE device_id = $1 AND radio = 'wifi24'
+                ORDER BY time DESC LIMIT 1
+                """,
+                d["id"],
+            )
+            client_count = await conn.fetchval(
+                """
+                SELECT count(DISTINCT client_mac) FROM radio_clients
+                WHERE device_id = $1 AND radio = 'wifi24' AND time > now() - interval '2 minutes'
+                """,
+                d["id"],
+            )
+            result.append(DeviceStatus(
+                mac=d["mac"],
+                role=d["role"],
+                hostname=d["hostname"],
+                last_seen=d["last_seen"],
+                latest_halow=RadioSnapshot(**dict(halow)) if halow else None,
+                latest_wifi24=RadioSnapshot(**dict(wifi24)) if wifi24 else None,
+                wifi24_client_count=client_count or 0,
+            ))
+        return result
+
+
+@app.get("/api/telemetry/{device_mac}", response_model=list[TelemetryPoint], dependencies=[Depends(require_token)])
+async def get_telemetry_history(
+    device_mac: str,
+    radio: str = Query(pattern="^(halow|wifi24)$"),
+    hours: float = Query(default=6, gt=0, le=24 * 30),
+):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT t.time, t.rssi, t.noise, t.mcs, t.rate_mbps, t.retries, t.channel, t.bandwidth_mhz
+            FROM telemetry t JOIN devices d ON d.id = t.device_id
+            WHERE d.mac = $1 AND t.radio = $2 AND t.time > now() - ($3 || ' hours')::interval
+            ORDER BY t.time ASC
+            """,
+            device_mac, radio, str(hours),
+        )
+        return [TelemetryPoint(**dict(r)) for r in rows]
+
+
+@app.get("/api/commands", response_model=list[CommandHistoryEntry], dependencies=[Depends(require_token)])
+async def get_command_history(limit: int = Query(default=50, gt=0, le=500)):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT c.id, d.mac AS device_mac, d.role AS device_role, c.param, c.target_value,
+                   c.previous_value, c.created_at, c.ttl_seconds, c.status, c.applied_at,
+                   c.acked_at, c.reason
+            FROM commands c JOIN devices d ON d.id = c.device_id
+            ORDER BY c.created_at DESC LIMIT $1
+            """,
+            limit,
+        )
+        return [CommandHistoryEntry(**dict(r)) for r in rows]
+
+
+@app.get("/dashboard")
+async def dashboard_page():
+    return FileResponse("static/dashboard.html")
 
 
 @app.get("/health")

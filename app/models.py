@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Literal, Optional
 
 from pydantic import BaseModel
@@ -38,4 +39,51 @@ class CommandOut(BaseModel):
 
 class CommandReport(BaseModel):
     status: Literal["applied", "acked", "reverted"]
+    reason: Optional[str] = None
+
+
+class RadioSnapshot(BaseModel):
+    time: Optional[datetime] = None
+    rssi: Optional[int] = None
+    noise: Optional[int] = None
+    mcs: Optional[int] = None
+    rate_mbps: Optional[float] = None
+    retries: Optional[float] = None
+    channel: Optional[int] = None
+    bandwidth_mhz: Optional[int] = None
+
+
+class DeviceStatus(BaseModel):
+    mac: str
+    role: Literal["AP", "STA"]
+    hostname: str
+    last_seen: Optional[datetime] = None
+    latest_halow: Optional[RadioSnapshot] = None
+    latest_wifi24: Optional[RadioSnapshot] = None
+    wifi24_client_count: int = 0
+
+
+class TelemetryPoint(BaseModel):
+    time: datetime
+    rssi: Optional[int] = None
+    noise: Optional[int] = None
+    mcs: Optional[int] = None
+    rate_mbps: Optional[float] = None
+    retries: Optional[float] = None
+    channel: Optional[int] = None
+    bandwidth_mhz: Optional[int] = None
+
+
+class CommandHistoryEntry(BaseModel):
+    id: int
+    device_mac: str
+    device_role: Literal["AP", "STA"]
+    param: str
+    target_value: dict
+    previous_value: Optional[dict] = None
+    created_at: datetime
+    ttl_seconds: int
+    status: Literal["pending", "applied", "acked", "reverted", "expired"]
+    applied_at: Optional[datetime] = None
+    acked_at: Optional[datetime] = None
     reason: Optional[str] = None

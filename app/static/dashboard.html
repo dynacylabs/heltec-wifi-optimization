@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HoboCams Status</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --orange: #d29922;
+    --blue: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    margin: 0;
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 20px; }
+  h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin: 32px 0 12px; }
+  #gate {
+    max-width: 400px; margin: 80px auto; text-align: center;
+  }
+  #gate input {
+    width: 100%; padding: 10px; margin-top: 12px; background: var(--panel); border: 1px solid var(--border);
+    color: var(--text); border-radius: 6px; font-size: 14px;
+  }
+  #gate button {
+    margin-top: 12px; padding: 10px 20px; background: var(--accent); border: none; border-radius: 6px;
+    color: #0d1117; font-weight: 600; cursor: pointer;
+  }
+  #gate .error { color: var(--red); margin-top: 8px; font-size: 13px; }
+  #app { display: none; }
+  .cards { display: flex; gap: 16px; flex-wrap: wrap; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 20px; min-width: 260px; flex: 1;
+  }
+  .card-title { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .dot.online { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.offline { background: var(--red); }
+  .kv { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font-size: 13px; }
+  .kv div.k { color: var(--muted); }
+  .kv div.v { text-align: right; font-variant-numeric: tabular-nums; }
+  .charts { display: flex; flex-direction: column; gap: 24px; }
+  .chart-box { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; height: 260px; }
+  .range-picker { display: flex; gap: 6px; margin-bottom: 16px; }
+  .range-picker button {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  .range-picker button.active { background: var(--accent); color: #0d1117; border-color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+  .badge.pending { background: #30363d; color: var(--muted); }
+  .badge.applied { background: rgba(88,166,255,0.15); color: var(--blue); }
+  .badge.acked { background: rgba(63,185,80,0.15); color: var(--green); }
+  .badge.reverted { background: rgba(248,81,73,0.15); color: var(--red); }
+  .badge.expired { background: rgba(210,153,34,0.15); color: var(--orange); }
+  code { background: rgba(110,118,129,0.15); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <h1>HoboCams Status</h1>
+  <div>Enter the API token to continue.</div>
+  <input id="token-input" type="password" placeholder="API token">
+  <button onclick="submitToken()">Continue</button>
+  <div class="error" id="gate-error"></div>
+</div>
+
+<div id="app">
+  <h1>HoboCams Status</h1>
+
+  <h2>Live Status</h2>
+  <div class="cards" id="status-cards"></div>
+
+  <h2>HaLow Link History</h2>
+  <div class="range-picker" id="range-picker">
+    <button data-hours="1">1h</button>
+    <button data-hours="6" class="active">6h</button>
+    <button data-hours="24">24h</button>
+    <button data-hours="168">7d</button>
+  </div>
+  <div class="charts">
+    <div class="chart-box"><canvas id="chart-rssi"></canvas></div>
+    <div class="chart-box"><canvas id="chart-retries"></canvas></div>
+    <div class="chart-box"><canvas id="chart-bandwidth"></canvas></div>
+  </div>
+
+  <h2>Command History</h2>
+  <div id="command-history"></div>
+</div>
+
+<script>
+const TOKEN_KEY = "hobocams_dashboard_token";
+let TOKEN = localStorage.getItem(TOKEN_KEY);
+let selectedHours = 6;
+let charts = {};
+
+function api(path) {
+  const sep = path.includes("?") ? "&" : "?";
+  return fetch(`${path}${sep}token=${encodeURIComponent(TOKEN)}`);
+}
+
+async function submitToken() {
+  const val = document.getElementById("token-input").value.trim();
+  if (!val) return;
+  const resp = await fetch(`/api/status?token=${encodeURIComponent(val)}`);
+  if (resp.status === 401) {
+    document.getElementById("gate-error").textContent = "Invalid token.";
+    return;
+  }
+  TOKEN = val;
+  localStorage.setItem(TOKEN_KEY, TOKEN);
+  showApp();
+}
+
+function showApp() {
+  document.getElementById("gate").style.display = "none";
+  document.getElementById("app").style.display = "block";
+  initCharts();
+  refreshAll();
+  setInterval(refreshStatus, 15000);
+  setInterval(refreshCommands, 15000);
+  setInterval(refreshCharts, 30000);
+}
+
+function timeAgo(iso) {
+  if (!iso) return "never";
+  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+  return `${Math.floor(secs / 86400)}d ago`;
+}
+
+function fmt(v, unit = "") {
+  return (v === null || v === undefined) ? "—" : `${v}${unit}`;
+}
+
+async function refreshStatus() {
+  const resp = await api("/api/status");
+  if (!resp.ok) return;
+  const devices = await resp.json();
+  const container = document.getElementById("status-cards");
+  container.innerHTML = "";
+  for (const d of devices) {
+    const online = d.last_seen && (Date.now() - new Date(d.last_seen).getTime()) < 90000;
+    const h = d.latest_halow || {};
+    const w = d.latest_wifi24 || {};
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="card-title">
+        <span class="dot ${online ? "online" : "offline"}"></span>
+        ${d.role} <span style="color:var(--muted); font-weight:400;">(${d.hostname || d.mac})</span>
+      </div>
+      <div class="kv">
+        <div class="k">Last seen</div><div class="v">${timeAgo(d.last_seen)}</div>
+        <div class="k">HaLow channel</div><div class="v">${fmt(h.channel)}</div>
+        <div class="k">HaLow bandwidth</div><div class="v">${fmt(h.bandwidth_mhz, " MHz")}</div>
+        <div class="k">HaLow RSSI / Noise</div><div class="v">${fmt(h.rssi, " dBm")} / ${fmt(h.noise, " dBm")}</div>
+        <div class="k">HaLow rate (MCS)</div><div class="v">${fmt(h.rate_mbps, " Mbit/s")} (MCS ${fmt(h.mcs)})</div>
+        <div class="k">HaLow retries</div><div class="v">${h.retries != null ? (h.retries * 100).toFixed(1) + "%" : "—"}</div>
+        <div class="k">2.4GHz channel</div><div class="v">${fmt(w.channel)}</div>
+        <div class="k">2.4GHz clients</div><div class="v">${d.wifi24_client_count}</div>
+      </div>
+    `;
+    container.appendChild(card);
+  }
+}
+
+function chartOpts(yLabel) {
+  return {
+    type: "line",
+    data: { datasets: [] },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      parsing: false,
+      scales: {
+        x: { type: "time", ticks: { color: "#8b949e" }, grid: { color: "#30363d" } },
+        y: { title: { display: true, text: yLabel, color: "#8b949e" }, ticks: { color: "#8b949e" }, grid: { color: "#30363d" } },
+      },
+      plugins: { legend: { labels: { color: "#c9d1d9" } } },
+    },
+  };
+}
+
+function initCharts() {
+  charts.rssi = new Chart(document.getElementById("chart-rssi"), chartOpts("dBm"));
+  charts.rssi.options.plugins.title = { display: true, text: "HaLow RSSI / Noise", color: "#c9d1d9" };
+  charts.retries = new Chart(document.getElementById("chart-retries"), chartOpts("fraction retried"));
+  charts.retries.options.plugins.title = { display: true, text: "HaLow Retries", color: "#c9d1d9" };
+  charts.bandwidth = new Chart(document.getElementById("chart-bandwidth"), chartOpts("MHz"));
+  charts.bandwidth.options.plugins.title = { display: true, text: "HaLow Bandwidth", color: "#c9d1d9" };
+
+  document.getElementById("range-picker").addEventListener("click", (e) => {
+    if (e.target.tagName !== "BUTTON") return;
+    document.querySelectorAll("#range-picker button").forEach(b => b.classList.remove("active"));
+    e.target.classList.add("active");
+    selectedHours = parseFloat(e.target.dataset.hours);
+    refreshCharts();
+  });
+}
+
+async function fetchSeries(mac, radio, hours) {
+  const resp = await api(`/api/telemetry/${encodeURIComponent(mac)}?radio=${radio}&hours=${hours}`);
+  if (!resp.ok) return [];
+  return await resp.json();
+}
+
+async function refreshCharts() {
+  const statusResp = await api("/api/status");
+  if (!statusResp.ok) return;
+  const devices = await statusResp.json();
+
+  const rssiDatasets = [];
+  const retriesDatasets = [];
+  const bwDatasets = [];
+  const colors = { AP: "#58a6ff", STA: "#3fb950" };
+
+  for (const d of devices) {
+    const series = await fetchSeries(d.mac, "halow", selectedHours);
+    const color = colors[d.role] || "#c9d1d9";
+
+    rssiDatasets.push({
+      label: `${d.role} RSSI`, borderColor: color, backgroundColor: color, pointRadius: 0, borderWidth: 2,
+      data: series.map(p => ({ x: p.time, y: p.rssi })),
+    });
+    rssiDatasets.push({
+      label: `${d.role} Noise`, borderColor: color, borderDash: [4, 4], pointRadius: 0, borderWidth: 1,
+      data: series.map(p => ({ x: p.time, y: p.noise })),
+    });
+    retriesDatasets.push({
+      label: `${d.role} Retries`, borderColor: color, backgroundColor: color, pointRadius: 0, borderWidth: 2,
+      data: series.map(p => ({ x: p.time, y: p.retries })),
+    });
+    bwDatasets.push({
+      label: `${d.role} Bandwidth`, borderColor: color, backgroundColor: color, pointRadius: 0, borderWidth: 2,
+      stepped: true,
+      data: series.map(p => ({ x: p.time, y: p.bandwidth_mhz })),
+    });
+  }
+
+  charts.rssi.data.datasets = rssiDatasets; charts.rssi.update();
+  charts.retries.data.datasets = retriesDatasets; charts.retries.update();
+  charts.bandwidth.data.datasets = bwDatasets; charts.bandwidth.update();
+}
+
+function statusBadge(status) {
+  return `<span class="badge ${status}">${status}</span>`;
+}
+
+async function refreshCommands() {
+  const resp = await api("/api/commands?limit=50");
+  if (!resp.ok) return;
+  const commands = await resp.json();
+  const container = document.getElementById("command-history");
+  if (commands.length === 0) {
+    container.innerHTML = '<div class="empty">No commands issued yet.</div>';
+    return;
+  }
+  const rows = commands.map(c => `
+    <tr>
+      <td>${new Date(c.created_at).toLocaleString()}</td>
+      <td>${c.device_role}</td>
+      <td>${c.param}</td>
+      <td><code>${JSON.stringify(c.target_value)}</code></td>
+      <td>${statusBadge(c.status)}</td>
+      <td>${c.reason || "—"}</td>
+    </tr>
+  `).join("");
+  container.innerHTML = `
+    <table>
+      <thead><tr><th>Time</th><th>Device</th><th>Param</th><th>Target</th><th>Status</th><th>Reason</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+function refreshAll() {
+  refreshStatus();
+  refreshCharts();
+  refreshCommands();
+}
+
+if (TOKEN) {
+  showApp();
+}
+</script>
+
+</body>
+</html>
