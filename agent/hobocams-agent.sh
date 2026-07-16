@@ -90,8 +90,22 @@ wifi24_ifname() {
 # power interruption in the field - expected on solar/battery - doesn't
 # strand the link on a channel the peer isn't listening on.
 verify_and_recover_radio() {
-    ifname="$(halow_ifname)"
-    [ -z "$ifname" ] && { echo "verify_and_recover_radio: no HaLow ifname yet, skipping" >&2; return 1; }
+    # At agent startup right after boot, radio1's interface may not have
+    # registered yet - wait for it rather than silently skipping the check
+    # (confirmed live: skipping here means a genuinely wrong channel could
+    # go completely unnoticed and unrecovered).
+    wait_attempt=1
+    ifname=""
+    while [ "$wait_attempt" -le 6 ]; do
+        ifname="$(halow_ifname)"
+        [ -n "$ifname" ] && break
+        sleep 5
+        wait_attempt=$((wait_attempt + 1))
+    done
+    if [ -z "$ifname" ]; then
+        logger -t hobocams-agent "verify_and_recover_radio: HaLow ifname never appeared after 30s, giving up"
+        return 1
+    fi
     expected_channel="$(uci get wireless.radio1.channel 2>/dev/null)"
     [ -z "$expected_channel" ] && { echo "verify_and_recover_radio: no configured channel in uci, skipping" >&2; return 1; }
 
