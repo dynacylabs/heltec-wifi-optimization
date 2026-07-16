@@ -30,11 +30,16 @@ WIFI24_CHANNELS = [1, 6, 11]
 
 # ntfy (https://ntfy.sh or self-hosted) push alerts for: a device going
 # offline/coming back, a command getting reverted, and sustained
-# degradation triggering an optimizer command. Optional - leave both blank
-# to disable alerting entirely (this repo stays host-agnostic; ntfy is a
-# convenience, not a dependency).
+# degradation triggering an optimizer command. Optional - leave blank to
+# disable alerting entirely (this repo stays host-agnostic; ntfy is a
+# convenience, not a dependency). NTFY_TOKEN is only required if your
+# instance doesn't allow anonymous publish to the topic (e.g.
+# auth-default-access: deny-all) - generate one with
+# `ntfy token add <user>` scoped to a write-only user for this topic,
+# rather than using a full account password here.
 NTFY_URL = os.environ.get("NTFY_URL", "").rstrip("/")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
+NTFY_TOKEN = os.environ.get("NTFY_TOKEN", "")
 NTFY_ENABLED = bool(NTFY_URL and NTFY_TOPIC)
 
 # How long a device can go without a telemetry POST before it's considered

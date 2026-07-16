@@ -26,6 +26,9 @@ services:
       # degradation. Leave both blank to disable alerting entirely.
       NTFY_URL: ""
       NTFY_TOPIC: ""
+      # Only needed if your ntfy instance doesn't allow anonymous publish
+      # to the topic - see config.py's comment.
+      NTFY_TOKEN: ""
       OFFLINE_ALERT_SECONDS: "300"
       LIVENESS_CHECK_INTERVAL_SECONDS: "60"
       # telemetry/radio_clients rows older than this are dropped

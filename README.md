@@ -134,6 +134,18 @@ leave either blank and alerting is entirely disabled (`app/notify.py`
 no-ops). A failed push never breaks the caller — it's logged and swallowed,
 never raised.
 
+If your ntfy instance doesn't allow anonymous publish (e.g.
+`auth-default-access: deny-all`), also set `NTFY_TOKEN`. Recommended setup:
+a dedicated user scoped to write-only access on just this topic, rather
+than reusing a personal account:
+```
+docker exec -e NTFY_PASSWORD=... <ntfy-container> ntfy user add --role=user hobocams
+docker exec <ntfy-container> ntfy access hobocams <topic> write-only
+docker exec <ntfy-container> ntfy token add -l hobocams-app hobocams
+```
+Use the `tk_...` token output from the last command as `NTFY_TOKEN` — it
+can be revoked independently of the account password later.
+
 What triggers an alert:
 
 - **Device offline** — no telemetry POST for longer than
