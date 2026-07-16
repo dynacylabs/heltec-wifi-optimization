@@ -270,6 +270,27 @@ Confirmed live via SSH against an HT-HD01-V2 AP/STA pair running OpenWrt
   channel sets per bandwidth don't overlap (e.g. channel 12 is only valid
   at 8MHz; at 4MHz the valid set is 8/16/24/32/40/48) - this is exactly
   what caused the silent-failure bug above.
+- **Confirmed live in production (not a bench artifact): narrowing to 2MHz
+  never actually applies on this hardware.** With genuinely zero real
+  traffic on the bench, the optimizer's narrow-bandwidth logic correctly
+  fired (`sustained low utilization (0.00 over 1440m)`) and tried to move
+  4MHz → 2MHz, channel 2 (the first/simplest valid channel at 2MHz). The
+  agent's `verify_command_applied()` correctly caught that the radio never
+  actually got there and reverted - but because channel selection for
+  widen/narrow was otherwise deterministic (always the same first valid
+  channel), it retried the identical, never-working target every single
+  cooldown period (6h) indefinitely. Fixed by tracking channels that have
+  ever reverted for a given device+param and skipping them in every
+  channel-picking path (widen/narrow *and* the degradation round-robin,
+  which had the same latent bug: once a cycled-to channel reverts,
+  `cur_channel` never advances, so the "next" channel computed from it is
+  the same failed one every time). See `_reverted_channels()` in
+  `app/optimizer.py`. This blacklist is permanent and has no expiry - if
+  every channel at a bandwidth eventually fails, the optimizer logs a
+  warning and stops attempting that bandwidth rather than looping forever;
+  clearing it requires manual DB intervention (or investigating why that
+  channel/bandwidth doesn't actually work on this hardware/regulatory
+  setup).
 
 ## Known gaps (see task list, not oversights)
 

@@ -62,6 +62,24 @@ async def _in_cooldown(conn, device_id, param: str, cooldown_minutes: int) -> bo
     return bool(last_change and datetime.now(timezone.utc) - last_change < timedelta(minutes=cooldown_minutes))
 
 
+async def _reverted_channels(conn, device_id, param: str) -> set:
+    # A channel that's reverted before doesn't necessarily mean it's really
+    # bad RF - it can also mean this specific channel/bandwidth combination
+    # just doesn't apply on this hardware (confirmed live: some entries in
+    # the theoretical channel-plan CSV silently fail to take). Either way,
+    # picking the exact same target again is pointless - without this, a
+    # channel pick that's deterministic (widen/narrow) or that wraps back
+    # to the same "next" channel every time (degradation cycling, once
+    # cur_channel stops advancing because the last attempt reverted) retries
+    # forever on a target that will never succeed.
+    rows = await conn.fetch(
+        "SELECT DISTINCT (target_value->>'channel')::int AS channel FROM commands "
+        "WHERE device_id = $1 AND param = $2 AND status = 'reverted'",
+        device_id, param,
+    )
+    return {r["channel"] for r in rows if r["channel"] is not None}
+
+
 async def _emit_halow_command(conn, device_id, mac, channel: int, bandwidth_mhz: int, current_channel, current_bw, reason: str):
     ttl_seconds = DEFAULT_COMMAND_TTL_SECONDS["halow_operating_freq"]
     await conn.execute(
@@ -118,10 +136,18 @@ async def _evaluate_halow_link(pool: asyncpg.Pool, settings):
             if not valid:
                 logger.warning("HaLow AP %s degraded but bandwidth %s MHz has no known valid channel list", ap["mac"], cur_bw)
                 return
-            try:
-                next_channel = valid[(valid.index(cur_channel) + 1) % len(valid)]
-            except ValueError:
-                next_channel = valid[0]
+            failed = await _reverted_channels(conn, ap["id"], "halow_operating_freq")
+            start_idx = valid.index(cur_channel) if cur_channel in valid else -1
+            next_channel = next(
+                (c for c in (valid[(start_idx + step) % len(valid)] for step in range(1, len(valid) + 1)) if c not in failed),
+                None,
+            )
+            if next_channel is None:
+                logger.warning(
+                    "HaLow AP %s degraded but every channel at %sMHz has previously failed to apply - not cycling further",
+                    ap["mac"], cur_bw,
+                )
+                return
             await _emit_halow_command(
                 conn, ap["id"], ap["mac"], next_channel, cur_bw, cur_channel, cur_bw,
                 f"degraded (avg retries={avg_retries:.3f} over {sustain_minutes}m), cycling channel",
@@ -143,13 +169,18 @@ async def _evaluate_halow_link(pool: asyncpg.Pool, settings):
             util = await _throughput_utilization(conn, ap["id"], widen_minutes)
             if util is not None and util >= settings["bandwidth_widen_utilization_threshold"]:
                 new_bw = BANDWIDTH_TIERS[BANDWIDTH_TIERS.index(cur_bw) + 1]
-                new_channel = _pick_channel_for_bandwidth(new_bw)
+                new_channel = await _pick_channel_for_bandwidth(conn, ap["id"], new_bw)
                 if new_channel is not None:
                     await _emit_halow_command(
                         conn, ap["id"], ap["mac"], new_channel, new_bw, cur_channel, cur_bw,
                         f"sustained high utilization ({util:.2f} over {widen_minutes}m), widening",
                     )
                     return
+                logger.warning(
+                    "HaLow AP %s: sustained high utilization would widen to %sMHz, but every channel "
+                    "there has previously failed to apply - not widening",
+                    ap["mac"], new_bw,
+                )
 
         # 3. Narrow - the mirror case, much longer sustain window since
         # it's the more conservative direction (better range/robustness at
@@ -159,22 +190,34 @@ async def _evaluate_halow_link(pool: asyncpg.Pool, settings):
             util = await _throughput_utilization(conn, ap["id"], narrow_minutes)
             if util is not None and util <= settings["bandwidth_narrow_utilization_threshold"]:
                 new_bw = BANDWIDTH_TIERS[BANDWIDTH_TIERS.index(cur_bw) - 1]
-                new_channel = _pick_channel_for_bandwidth(new_bw)
+                new_channel = await _pick_channel_for_bandwidth(conn, ap["id"], new_bw)
                 if new_channel is not None:
                     await _emit_halow_command(
                         conn, ap["id"], ap["mac"], new_channel, new_bw, cur_channel, cur_bw,
                         f"sustained low utilization ({util:.2f} over {narrow_minutes}m), narrowing",
                     )
                     return
+                logger.warning(
+                    "HaLow AP %s: sustained low utilization would narrow to %sMHz, but every channel "
+                    "there has previously failed to apply - not narrowing",
+                    ap["mac"], new_bw,
+                )
 
 
-def _pick_channel_for_bandwidth(bandwidth_mhz: int):
+async def _pick_channel_for_bandwidth(conn, device_id, bandwidth_mhz: int):
     # Simplest possible choice, not frequency-proximity-aware: the first
-    # valid channel at the new bandwidth. Same "honest v1" reasoning as
-    # the round-robin channel cycling above - good enough to make widening
-    # and narrowing real and working, not necessarily the smartest pick.
+    # valid channel at the new bandwidth that hasn't already reverted for
+    # this device. Same "honest v1" reasoning as the round-robin channel
+    # cycling above - good enough to make widening and narrowing real and
+    # working, not necessarily the smartest pick. Without the failed-channel
+    # check this was confirmed live to retry the exact same (never-working)
+    # channel every cooldown period forever, since the pick is otherwise
+    # deterministic - see README/Gotchas.
     valid = halow_channel_plan.valid_channels(bandwidth_mhz)
-    return valid[0] if valid else None
+    if not valid:
+        return None
+    failed = await _reverted_channels(conn, device_id, "halow_operating_freq")
+    return next((c for c in valid if c not in failed), None)
 
 
 async def _throughput_utilization(conn, device_id, minutes: int):
@@ -240,11 +283,21 @@ async def _evaluate_wifi24_link(pool: asyncpg.Pool, settings):
         # Same reasoning as HaLow: no real scan telemetry to score
         # candidates against, so this cycles through the standard
         # non-overlapping channels round-robin rather than guessing at a
-        # heuristic.
-        try:
-            next_channel = WIFI24_CHANNELS[(WIFI24_CHANNELS.index(current_channel) + 1) % len(WIFI24_CHANNELS)]
-        except ValueError:
-            next_channel = WIFI24_CHANNELS[0]
+        # heuristic. Also skips any channel that's previously reverted for
+        # this device/param, same as HaLow - otherwise a channel that never
+        # actually applies gets retried forever every cooldown period.
+        failed = await _reverted_channels(conn, sta["id"], "wifi24_channel")
+        start_idx = WIFI24_CHANNELS.index(current_channel) if current_channel in WIFI24_CHANNELS else -1
+        next_channel = next(
+            (c for c in (WIFI24_CHANNELS[(start_idx + step) % len(WIFI24_CHANNELS)] for step in range(1, len(WIFI24_CHANNELS) + 1)) if c not in failed),
+            None,
+        )
+        if next_channel is None:
+            logger.warning(
+                "2.4GHz link on STA %s degraded but every standard channel has previously failed to apply - not cycling further",
+                sta["mac"],
+            )
+            return
 
         ttl_seconds = DEFAULT_COMMAND_TTL_SECONDS["wifi24_channel"]
         await conn.execute(
