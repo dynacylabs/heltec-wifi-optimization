@@ -243,7 +243,24 @@ verify_command_applied() {
     [ -z "$ifname" ] && return 1
     target_channel="$(echo "$2" | jsonfilter -e '@.channel' 2>/dev/null)"
     live_channel="$(ubus call iwinfo info "{\"device\":\"$ifname\"}" 2>/dev/null | jsonfilter -e '@.channel' 2>/dev/null)"
-    [ -n "$live_channel" ] && [ "$live_channel" = "$target_channel" ]
+    [ -z "$live_channel" ] || [ "$live_channel" != "$target_channel" ] && return 1
+
+    if [ "$1" = "halow_operating_freq" ]; then
+        # Our own radio reaching the target channel proves nothing about
+        # whether the PEER followed - this is a P2P bridge, so a healthy
+        # change means the STA reassociated, not just that our own radio
+        # moved. This matters far more once this isn't sitting on a bench
+        # with a huge signal margin: a bad change could leave our own
+        # radio looking perfectly fine while the far end never comes back.
+        peer_mac="$(ubus call iwinfo assoclist "{\"device\":\"$ifname\"}" 2>/dev/null | jsonfilter -e '@.results[0].mac' 2>/dev/null)"
+        [ -z "$peer_mac" ] && return 1
+    fi
+    # wifi24_channel has no equivalent check: Blink/Shelly clients are
+    # transient (can legitimately be idle/off), so "zero clients right
+    # now" doesn't mean the change failed the way "zero HaLow peers" does
+    # on a link that's supposed to always have exactly one.
+
+    return 0
 }
 
 poll_and_apply_command() {

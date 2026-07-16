@@ -23,6 +23,11 @@ BANDWIDTH_TIERS = [1, 2, 4, 8]  # MHz, matches halow_channel_plan.py
 
 async def run_optimizer_pass(pool: asyncpg.Pool):
     try:
+        async with pool.acquire() as conn:
+            enabled = await conn.fetchval("SELECT enabled FROM optimizer_state LIMIT 1")
+        if not enabled:
+            logger.info("Optimizer paused via kill switch, skipping this pass")
+            return
         await _evaluate_halow_link(pool)
         await _evaluate_wifi24_link(pool)
     except Exception:

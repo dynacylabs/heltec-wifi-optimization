@@ -63,12 +63,31 @@
   .badge.expired { background: rgba(210,153,34,0.15); color: var(--orange); }
   code { background: rgba(110,118,129,0.15); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
   .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+  .kill-switch {
+    display: flex; align-items: center; gap: 14px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 8px; padding: 12px 18px; margin-bottom: 20px;
+  }
+  .kill-switch .status-text { font-weight: 600; font-size: 14px; }
+  .kill-switch .status-text.active { color: var(--green); }
+  .kill-switch .status-text.paused { color: var(--red); }
+  .kill-switch .status-sub { color: var(--muted); font-size: 12px; flex: 1; }
+  .kill-switch button {
+    padding: 8px 16px; border-radius: 6px; border: none; font-weight: 600; font-size: 13px; cursor: pointer;
+  }
+  .kill-switch button.pause { background: var(--red); color: #fff; }
+  .kill-switch button.resume { background: var(--green); color: #0d1117; }
 </style>
 </head>
 <body>
 
 <div id="app">
   <h1>HoboCams Status</h1>
+
+  <div class="kill-switch">
+    <span class="status-text" id="optimizer-status-text">Optimizer: ...</span>
+    <span class="status-sub">Pausing stops it from issuing any new commands. Anything already in flight still runs its own rollback safety net regardless.</span>
+    <button id="optimizer-toggle-btn" onclick="toggleOptimizer()">...</button>
+  </div>
 
   <h2>Live Status</h2>
   <div class="cards" id="status-cards"></div>
@@ -129,17 +148,50 @@ const TOKEN = __API_TOKEN__;
 let selectedHours = 6;
 let charts = {};
 
-function api(path) {
+function api(path, options = {}) {
   const sep = path.includes("?") ? "&" : "?";
-  return fetch(`${path}${sep}token=${encodeURIComponent(TOKEN)}`);
+  return fetch(`${path}${sep}token=${encodeURIComponent(TOKEN)}`, options);
+}
+
+async function refreshOptimizerState() {
+  const resp = await api("/api/optimizer");
+  if (!resp.ok) return;
+  const state = await resp.json();
+  const textEl = document.getElementById("optimizer-status-text");
+  const btnEl = document.getElementById("optimizer-toggle-btn");
+  if (state.enabled) {
+    textEl.textContent = "Optimizer: Active";
+    textEl.className = "status-text active";
+    btnEl.textContent = "Pause Optimizer";
+    btnEl.className = "pause";
+    btnEl.dataset.target = "false";
+  } else {
+    textEl.textContent = "Optimizer: Paused";
+    textEl.className = "status-text paused";
+    btnEl.textContent = "Resume Optimizer";
+    btnEl.className = "resume";
+    btnEl.dataset.target = "true";
+  }
+}
+
+async function toggleOptimizer() {
+  const btnEl = document.getElementById("optimizer-toggle-btn");
+  const target = btnEl.dataset.target === "true";
+  await api("/api/optimizer", {
+    method: "POST",
+    body: JSON.stringify({ enabled: target }),
+  });
+  refreshOptimizerState();
 }
 
 function showApp() {
   initCharts();
   refreshAll();
+  refreshOptimizerState();
   setInterval(refreshStatus, 15000);
   setInterval(refreshCommands, 15000);
   setInterval(refreshCharts, 30000);
+  setInterval(refreshOptimizerState, 15000);
 }
 
 function timeAgo(iso) {

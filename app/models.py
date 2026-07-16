@@ -101,3 +101,7 @@ class CommandHistoryEntry(BaseModel):
     applied_at: Optional[datetime] = None
     acked_at: Optional[datetime] = None
     reason: Optional[str] = None
+
+
+class OptimizerState(BaseModel):
+    enabled: bool

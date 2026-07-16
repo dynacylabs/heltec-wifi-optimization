@@ -57,6 +57,13 @@ status page (no Grafana knowledge required) served directly by the app:
   disconnected during that window.
 - **Command history table** — what was attempted, target value, and
   whether it was kept (`pending` → `applied` → `acked`/`reverted`/`expired`).
+- **Kill switch** — pauses the optimizer so it stops issuing any *new*
+  commands (`optimizer_state` table, `GET`/`POST /api/optimizer`).
+  Deliberately does not touch anything already in flight - those still go
+  through their own rollback safety net regardless. Meant for exactly the
+  moment the STA is somewhere hard to physically reach and you want to
+  just observe real telemetry for a while before trusting the optimizer
+  to act on its own.
 
 The API token is injected server-side when rendering the page — no
 prompt, nothing stored in the browser. Access control for a human is
@@ -185,6 +192,16 @@ Confirmed live via SSH against an HT-HD01-V2 AP/STA pair running OpenWrt
   timeout. A live test (channel 8→12 while at 4MHz bandwidth) reproduced
   exactly this failure mode and confirmed the fix catches it correctly,
   with the radio never actually disrupted either time.
+- That verification originally only checked the AP's *own* radio state,
+  which proves nothing about whether the STA (the actual peer on this P2P
+  bridge) reassociated - the AP's path to the server is Ethernet, entirely
+  independent of HaLow, so "the AP is still reachable" was never a
+  meaningful signal about link health. `verify_command_applied()` now
+  also requires at least one associated peer in `iwinfo assoclist` for
+  `halow_operating_freq` changes specifically (not for `wifi24_channel` -
+  Blink/Shelly clients are legitimately transient, so "zero clients right
+  now" doesn't mean a change failed the way "zero HaLow peers" does on a
+  link that's supposed to always have exactly one).
 - The real US HaLow channel-plan (`app/halow_channel_plan.py`) is sourced
   directly from `/usr/share/morse-regdb/channels.csv` on the device
   (package `morse-regdb`, confirmed live) - not guessed, not derived from

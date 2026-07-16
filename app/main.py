@@ -15,6 +15,7 @@ from models import (
     CommandOut,
     CommandReport,
     DeviceStatus,
+    OptimizerState,
     RadioClientPoint,
     RadioSnapshot,
     TelemetryPoint,
@@ -298,6 +299,26 @@ async def get_command_history(limit: int = Query(default=50, gt=0, le=500)):
             limit,
         )
         return [CommandHistoryEntry(**dict(r)) for r in rows]
+
+
+@app.get("/api/optimizer", response_model=OptimizerState, dependencies=[Depends(require_token)])
+async def get_optimizer_state():
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        enabled = await conn.fetchval("SELECT enabled FROM optimizer_state LIMIT 1")
+        return OptimizerState(enabled=bool(enabled))
+
+
+@app.post("/api/optimizer", status_code=204, dependencies=[Depends(require_token)])
+async def set_optimizer_state(request: Request):
+    # The dashboard's kill switch. Pausing stops the optimizer from
+    # issuing any NEW commands - it does not touch anything already in
+    # flight, which still goes through its own rollback safety net.
+    state = await parse_body(request, OptimizerState)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE optimizer_state SET enabled = $1", state.enabled)
+    logger.warning("Optimizer %s via dashboard kill switch", "ENABLED" if state.enabled else "DISABLED")
 
 
 @app.get("/")
