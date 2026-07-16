@@ -74,6 +74,53 @@ wifi24_ifname() {
     ubus call network.wireless status 2>/dev/null | jsonfilter -e '@.radio0.interfaces[0].ifname' 2>/dev/null
 }
 
+# Confirmed live (2026-07): after a cold boot or a full `wifi down`/`wifi up`
+# restart, this specific HaLow radio can come up on a fallback 1MHz channel
+# (seen: 11, then 7) instead of the channel configured in uci - hostapd logs
+# `Command 'morse_cli ... channel ...' failed with error code -1` /
+# `morse_cmd_vendor_set_channel ... failed with rc -1` at the kernel/SDIO
+# level. A LIVE reconf (while already up) reliably applies a channel change,
+# but cold bring-up does not reliably reach the configured one. Recovery
+# that worked live: `wifi down radio1`, a hard chip reset via the vendor's
+# own MM_RESET GPIO script (this actually power-cycles the Morse Micro
+# module, not just the kernel driver - a plain reboot alone was NOT
+# sufficient, confirmed across multiple attempts), then `wifi up radio1`
+# followed by a live channel reconf. Run once at agent startup (i.e. once
+# per device boot, or whenever the agent process itself restarts) so a
+# power interruption in the field - expected on solar/battery - doesn't
+# strand the link on a channel the peer isn't listening on.
+verify_and_recover_radio() {
+    ifname="$(halow_ifname)"
+    [ -z "$ifname" ] && { echo "verify_and_recover_radio: no HaLow ifname yet, skipping" >&2; return 1; }
+    expected_channel="$(uci get wireless.radio1.channel 2>/dev/null)"
+    [ -z "$expected_channel" ] && { echo "verify_and_recover_radio: no configured channel in uci, skipping" >&2; return 1; }
+
+    attempt=1
+    while [ "$attempt" -le 3 ]; do
+        live_channel="$(ubus call iwinfo info "{\"device\":\"$ifname\"}" 2>/dev/null | jsonfilter -e '@.channel' 2>/dev/null)"
+        if [ "$live_channel" = "$expected_channel" ]; then
+            logger -t hobocams-agent "HaLow radio confirmed on configured channel $expected_channel"
+            return 0
+        fi
+        logger -t hobocams-agent "HaLow radio on channel ${live_channel:-none}, expected $expected_channel (recovery attempt $attempt/3) - hard-resetting chip"
+        wifi down radio1 2>/dev/null
+        sleep 2
+        [ -x /morse/scripts/chipreset.sh ] && sh /morse/scripts/chipreset.sh 2>/dev/null
+        sleep 3
+        wifi up radio1 2>/dev/null
+        sleep 8
+        # A live reconf on top of the fresh bring-up is what actually got the
+        # channel to stick in testing, not the reset/restart alone.
+        ubus call network.wireless reconf 2>/dev/null
+        sleep 8
+        ifname="$(halow_ifname)"
+        attempt=$((attempt + 1))
+    done
+
+    logger -t hobocams-agent "HaLow radio FAILED to reach configured channel $expected_channel after 3 recovery attempts - manual intervention likely needed"
+    return 1
+}
+
 # Fraction of (cur_num - prev_num) over (cur_den - prev_den) since the last
 # call with this state key, e.g. retries-over-packets since the last poll.
 # Cumulative counters reset (reboot, counter wrap) are treated as "no data
@@ -330,6 +377,11 @@ poll_and_apply_command() {
         fi
     ) &
 }
+
+# Once per agent start (device boot, or a manual agent restart) - see
+# verify_and_recover_radio()'s comment for why this matters on solar/battery
+# power specifically.
+verify_and_recover_radio
 
 while true; do
     post_telemetry
