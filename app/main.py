@@ -8,19 +8,27 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, ValidationError
 
-from config import API_TOKEN, OPTIMIZER_INTERVAL_SECONDS
-from db import close_pool, get_pool
+from config import (
+    API_TOKEN,
+    DEFAULT_COMMAND_TTL_SECONDS,
+    LIVENESS_CHECK_INTERVAL_SECONDS,
+    OFFLINE_ALERT_SECONDS,
+    OPTIMIZER_INTERVAL_SECONDS,
+)
+from db import close_pool, ensure_retention_policies, get_pool
 from models import (
     CommandHistoryEntry,
     CommandOut,
     CommandReport,
     DeviceStatus,
+    OptimizerSettings,
     OptimizerState,
     RadioClientPoint,
     RadioSnapshot,
     TelemetryPoint,
     TelemetryReport,
 )
+from notify import notify
 from optimizer import run_optimizer_pass
 
 logging.basicConfig(level=logging.INFO)
@@ -32,7 +40,9 @@ scheduler = AsyncIOScheduler()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     pool = await get_pool()
+    await ensure_retention_policies(pool)
     scheduler.add_job(run_optimizer_pass, "interval", seconds=OPTIMIZER_INTERVAL_SECONDS, args=[pool])
+    scheduler.add_job(check_device_liveness, "interval", seconds=LIVENESS_CHECK_INTERVAL_SECONDS, args=[pool])
     scheduler.start()
     yield
     scheduler.shutdown()
@@ -61,12 +71,22 @@ async def parse_body(request: Request, model: type[BaseModel]):
 
 async def _get_or_create_device(pool, mac: str, role: str | None, hostname: str | None):
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT id FROM devices WHERE mac = $1", mac)
+        row = await conn.fetchrow("SELECT id, role, offline_alerted FROM devices WHERE mac = $1", mac)
         if row:
             await conn.execute(
                 "UPDATE devices SET last_seen = now(), hostname = COALESCE($2, hostname) WHERE id = $1",
                 row["id"], hostname,
             )
+            if row["offline_alerted"]:
+                # Telemetry resumed after we'd already alerted on the
+                # outage - clear the flag so a future outage alerts again,
+                # and let whoever got paged know it's over.
+                await conn.execute("UPDATE devices SET offline_alerted = false WHERE id = $1", row["id"])
+                await notify(
+                    f"HoboCams: {row['role']} {hostname or mac} back online",
+                    "Telemetry resumed after an outage.",
+                    tags="white_check_mark",
+                )
             return row["id"]
         if role is None:
             raise HTTPException(400, "unknown device and no role provided to register it")
@@ -75,6 +95,29 @@ async def _get_or_create_device(pool, mac: str, role: str | None, hostname: str 
             role, mac, hostname or "",
         )
         return row["id"]
+
+
+async def check_device_liveness(pool):
+    # Runs independently of the optimizer pass - a device being offline has
+    # nothing to do with rule evaluation, and we want this checked on its
+    # own (usually much shorter) interval.
+    async with pool.acquire() as conn:
+        stale = await conn.fetch(
+            """
+            SELECT id, mac, hostname, role FROM devices
+            WHERE offline_alerted = false
+              AND (last_seen IS NULL OR last_seen < now() - ($1 || ' seconds')::interval)
+            """,
+            OFFLINE_ALERT_SECONDS,
+        )
+        for d in stale:
+            await conn.execute("UPDATE devices SET offline_alerted = true WHERE id = $1", d["id"])
+            await notify(
+                f"HoboCams: {d['role']} {d['hostname'] or d['mac']} offline",
+                f"No telemetry received in over {OFFLINE_ALERT_SECONDS}s.",
+                priority="high",
+                tags="warning",
+            )
 
 
 @app.post("/telemetry", status_code=204, dependencies=[Depends(require_token)])
@@ -158,6 +201,21 @@ async def report_command(command_id: int, request: Request):
                 "UPDATE commands SET status = $2, reason = $3 WHERE id = $1",
                 command_id, report.status, report.reason,
             )
+            if report.status == "reverted":
+                info = await conn.fetchrow(
+                    """
+                    SELECT d.mac, d.role, c.param, c.target_value FROM commands c
+                    JOIN devices d ON d.id = c.device_id WHERE c.id = $1
+                    """,
+                    command_id,
+                )
+                if info:
+                    await notify(
+                        f"HoboCams: {info['role']} command reverted",
+                        f"{info['param']} -> {info['target_value']} was reverted: {report.reason or 'no reason given'}",
+                        priority="high",
+                        tags="rotating_light",
+                    )
 
 
 # Agent posts roughly every 30s; treat gaps beyond this as real downtime
@@ -319,6 +377,65 @@ async def set_optimizer_state(request: Request):
     async with pool.acquire() as conn:
         await conn.execute("UPDATE optimizer_state SET enabled = $1", state.enabled)
     logger.warning("Optimizer %s via dashboard kill switch", "ENABLED" if state.enabled else "DISABLED")
+
+
+@app.post("/api/devices/{device_mac}/reboot", status_code=202, dependencies=[Depends(require_token)])
+async def reboot_device(device_mac: str):
+    # Queued through the same commands table as everything else, but the
+    # agent special-cases 'reboot' - there's no uci apply/rollback to do,
+    # and no live-state to verify afterward (the device disappears). Meant
+    # for "the agent process is wedged but the device is still up", which
+    # otherwise has no remote recovery path on hardware sitting somewhere
+    # hard to physically reach.
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        device = await conn.fetchrow("SELECT id, role FROM devices WHERE mac = $1", device_mac)
+        if not device:
+            raise HTTPException(404, "unknown device")
+        await conn.execute(
+            "INSERT INTO commands (device_id, param, target_value, ttl_seconds) VALUES ($1, 'reboot', '{}'::jsonb, $2)",
+            device["id"], DEFAULT_COMMAND_TTL_SECONDS["reboot"],
+        )
+    logger.warning("Reboot command queued for %s (%s) via dashboard", device_mac, device["role"])
+
+
+@app.get("/api/settings", response_model=OptimizerSettings, dependencies=[Depends(require_token)])
+async def get_optimizer_settings():
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT retry_rate_degraded_threshold, degraded_sustain_minutes, channel_cooldown_minutes,
+                   bandwidth_widen_utilization_threshold, bandwidth_widen_sustain_minutes,
+                   bandwidth_narrow_utilization_threshold, bandwidth_narrow_sustain_minutes
+            FROM optimizer_state LIMIT 1
+            """
+        )
+        return OptimizerSettings(**dict(row))
+
+
+@app.post("/api/settings", status_code=204, dependencies=[Depends(require_token)])
+async def set_optimizer_settings(request: Request):
+    settings = await parse_body(request, OptimizerSettings)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE optimizer_state SET
+                retry_rate_degraded_threshold = $1,
+                degraded_sustain_minutes = $2,
+                channel_cooldown_minutes = $3,
+                bandwidth_widen_utilization_threshold = $4,
+                bandwidth_widen_sustain_minutes = $5,
+                bandwidth_narrow_utilization_threshold = $6,
+                bandwidth_narrow_sustain_minutes = $7
+            """,
+            settings.retry_rate_degraded_threshold, settings.degraded_sustain_minutes,
+            settings.channel_cooldown_minutes, settings.bandwidth_widen_utilization_threshold,
+            settings.bandwidth_widen_sustain_minutes, settings.bandwidth_narrow_utilization_threshold,
+            settings.bandwidth_narrow_sustain_minutes,
+        )
+    logger.warning("Optimizer settings updated via dashboard: %s", settings)
 
 
 @app.get("/")

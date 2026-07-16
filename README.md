@@ -29,9 +29,16 @@ uncommitted edit, or maintain them in a private fork/branch.
    every device-facing endpoint requires (see "API authentication"
    below) — and use the *same* value when configuring
    `HOBOCAMS_API_TOKEN` in each device's `/etc/hobocams-agent.conf`.
+   Optionally set `NTFY_URL`/`NTFY_TOPIC` for push alerts — see
+   "Alerting" below.
 3. `docker compose up -d --build`
-   - First boot runs `db/migrations/001_init.sql` automatically (Postgres
-     only runs `/docker-entrypoint-initdb.d` on an empty data volume).
+   - First boot runs everything in `db/migrations/` automatically
+     (Postgres only runs `/docker-entrypoint-initdb.d` on an empty data
+     volume). On an **existing** deployment (data volume already has
+     data), Postgres won't re-run these — apply any new migration files
+     by hand, e.g.:
+     `docker compose exec -T timescaledb psql -U hobocams -d hobocams < db/migrations/005_add_offline_alerted.sql`
+     (repeat for each new numbered file you haven't applied yet).
 4. Check `http://<host>:8080/health` returns `{"status": "ok"}`.
 5. Grafana at `http://<host>:3000` (login `admin` / whatever you set for
    `GF_SECURITY_ADMIN_PASSWORD`) — the TimescaleDB datasource and a starter
@@ -64,6 +71,19 @@ status page (no Grafana knowledge required) served directly by the app:
   moment the STA is somewhere hard to physically reach and you want to
   just observe real telemetry for a while before trusting the optimizer
   to act on its own.
+- **Reboot button** — queues a `reboot` command for that device through
+  the normal command flow (`POST /api/devices/{mac}/reboot`), asks for
+  confirmation first. Unlike `halow_operating_freq`/`wifi24_channel`,
+  there's no uci apply/rollback/verify around this — the device is about
+  to disappear, so there's nothing to roll back. Meant for "the agent
+  process is wedged but the device itself is still up," which otherwise
+  has no remote recovery path once the STA is somewhere you can't easily
+  walk over to.
+- **Optimizer Settings** — the rule-based thresholds (retry-rate
+  degradation trigger, sustain windows, bandwidth widen/narrow
+  utilization) are editable here directly (`optimizer_state` table,
+  `GET`/`POST /api/settings`) instead of being hardcoded in `config.py` —
+  tune them as real telemetry comes in without a rebuild/redeploy.
 
 The API token is injected server-side when rendering the page — no
 prompt, nothing stored in the browser. Access control for a human is
@@ -105,6 +125,35 @@ case a public subdomain is the only path back to the server). In that
 case, don't put this endpoint behind an SSO/forward-auth layer (it has no
 login flow, it's a plain machine-to-machine API) — the token is the only
 protection, so treat it like a real secret.
+
+## Alerting
+
+Optional [ntfy](https://ntfy.sh) push alerts (self-hosted or ntfy.sh) — set
+`NTFY_URL` and `NTFY_TOPIC` in `docker-compose.yml` on the `app` service;
+leave either blank and alerting is entirely disabled (`app/notify.py`
+no-ops). A failed push never breaks the caller — it's logged and swallowed,
+never raised.
+
+What triggers an alert:
+
+- **Device offline** — no telemetry POST for longer than
+  `OFFLINE_ALERT_SECONDS` (default 300s; checked every
+  `LIVENESS_CHECK_INTERVAL_SECONDS`, default 60s). Alerts once per outage,
+  not on every check — and sends a follow-up "back online" notice the
+  moment telemetry resumes.
+- **Command reverted** — any command (channel/bandwidth change) that the
+  agent reports back as `reverted` (target never actually reached, or no
+  ack within its TTL).
+- **Sustained degradation** — specifically when the optimizer's
+  degradation detector fires and cycles a channel (HaLow or 2.4GHz). Note
+  this does *not* fire for bandwidth widen/narrow — those happen on an
+  otherwise-healthy link and aren't actionable/urgent the way real
+  degradation is.
+
+This intentionally does not try to be a general-purpose monitoring
+solution — it's a small, direct wiring of the events that actually matter
+for "is the link still doing its job," using infrastructure (`ntfy`) most
+homelab setups already have running rather than adding a new dependency.
 
 ## Validating the full loop before writing real rules
 
@@ -236,9 +285,18 @@ Confirmed live via SSH against an HT-HD01-V2 AP/STA pair running OpenWrt
   they're more disruptive changes. **The specific thresholds (70%/10%
   utilization, 60min/24h windows) are reasonable-sounding defaults, not
   empirically validated against real traffic** - there's no meaningful
-  Blink/Shelly load on the bench to tune against yet. Revisit once real
-  usage data exists. The channel picked for the new bandwidth is also the
-  simplest possible choice (first valid channel), not frequency-proximity
-  aware.
+  Blink/Shelly load on the bench to tune against yet. They're now editable
+  from the dashboard's Optimizer Settings section (`optimizer_state`
+  table) without a rebuild, so revisit them once real usage data exists
+  rather than editing `config.py` and redeploying. The channel picked for
+  the new bandwidth is also the simplest possible choice (first valid
+  channel), not frequency-proximity aware.
 - TX power is intentionally not a lever (no battery/power constraint on
   this particular system — remove this line if that doesn't apply to you).
+- `TELEMETRY_RETENTION_DAYS` (default 180) is applied as a TimescaleDB
+  retention policy at startup, with `if_not_exists => true` so it's safe
+  to call every boot - but that also means changing the value on a
+  deployment that already has the policy won't take effect on its own.
+  To actually change it later:
+  `docker compose exec timescaledb psql -U hobocams -d hobocams -c "SELECT remove_retention_policy('telemetry'); SELECT remove_retention_policy('radio_clients');"`
+  then update `TELEMETRY_RETENTION_DAYS` and restart the `app` service.

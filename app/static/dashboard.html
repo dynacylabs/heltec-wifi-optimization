@@ -76,6 +76,25 @@
   }
   .kill-switch button.pause { background: var(--red); color: #fff; }
   .kill-switch button.resume { background: var(--green); color: #0d1117; }
+  .reboot-btn {
+    margin-left: auto; background: none; border: 1px solid var(--border); color: var(--muted);
+    font-size: 11px; padding: 3px 8px; border-radius: 5px; cursor: pointer;
+  }
+  .reboot-btn:hover { color: var(--text); border-color: var(--text); }
+  .settings-box { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; max-width: 640px; }
+  .settings-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; gap: 16px; }
+  .settings-row:last-of-type { border-bottom: none; }
+  .settings-row .settings-input { display: flex; align-items: center; gap: 6px; color: var(--muted); white-space: nowrap; }
+  .settings-row input {
+    width: 70px; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 4px; padding: 4px 6px; text-align: right; font-variant-numeric: tabular-nums; font-size: 13px;
+  }
+  .settings-actions { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+  .settings-actions button {
+    padding: 8px 16px; border-radius: 6px; border: none; font-weight: 600; font-size: 13px;
+    cursor: pointer; background: var(--accent); color: #0d1117;
+  }
+  .settings-status { font-size: 12px; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -136,6 +155,42 @@
 
   <h2>Command History</h2>
   <div id="command-history"></div>
+
+  <h2>Optimizer Settings</h2>
+  <div class="settings-box" id="settings-box">
+    <div class="settings-row">
+      <span>Degradation trigger: retry rate above</span>
+      <span class="settings-input"><input type="number" id="set-retry-threshold" min="0" max="100" step="1">%</span>
+    </div>
+    <div class="settings-row">
+      <span>...sustained for</span>
+      <span class="settings-input"><input type="number" id="set-degraded-sustain" min="1" step="1">minutes</span>
+    </div>
+    <div class="settings-row">
+      <span>Cooldown between channel changes</span>
+      <span class="settings-input"><input type="number" id="set-cooldown" min="1" step="1">minutes</span>
+    </div>
+    <div class="settings-row">
+      <span>Widen HaLow bandwidth when utilization above</span>
+      <span class="settings-input"><input type="number" id="set-widen-threshold" min="0" max="100" step="1">%</span>
+    </div>
+    <div class="settings-row">
+      <span>...sustained for</span>
+      <span class="settings-input"><input type="number" id="set-widen-sustain" min="1" step="1">minutes</span>
+    </div>
+    <div class="settings-row">
+      <span>Narrow HaLow bandwidth when utilization below</span>
+      <span class="settings-input"><input type="number" id="set-narrow-threshold" min="0" max="100" step="1">%</span>
+    </div>
+    <div class="settings-row">
+      <span>...sustained for</span>
+      <span class="settings-input"><input type="number" id="set-narrow-sustain" min="1" step="1">minutes</span>
+    </div>
+    <div class="settings-actions">
+      <button onclick="saveSettings()">Save Settings</button>
+      <span class="settings-status" id="settings-status"></span>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -184,10 +239,46 @@ async function toggleOptimizer() {
   refreshOptimizerState();
 }
 
+async function rebootDevice(mac, roleLabel) {
+  if (!confirm(`Reboot ${roleLabel} (${mac})? It will be unreachable for a bit while it restarts.`)) return;
+  await api(`/api/devices/${encodeURIComponent(mac)}/reboot`, { method: "POST" });
+  alert(`Reboot queued for ${roleLabel}.`);
+}
+
+async function loadSettings() {
+  const resp = await api("/api/settings");
+  if (!resp.ok) return;
+  const s = await resp.json();
+  document.getElementById("set-retry-threshold").value = Math.round(s.retry_rate_degraded_threshold * 100);
+  document.getElementById("set-degraded-sustain").value = s.degraded_sustain_minutes;
+  document.getElementById("set-cooldown").value = s.channel_cooldown_minutes;
+  document.getElementById("set-widen-threshold").value = Math.round(s.bandwidth_widen_utilization_threshold * 100);
+  document.getElementById("set-widen-sustain").value = s.bandwidth_widen_sustain_minutes;
+  document.getElementById("set-narrow-threshold").value = Math.round(s.bandwidth_narrow_utilization_threshold * 100);
+  document.getElementById("set-narrow-sustain").value = s.bandwidth_narrow_sustain_minutes;
+}
+
+async function saveSettings() {
+  const statusEl = document.getElementById("settings-status");
+  const body = {
+    retry_rate_degraded_threshold: parseFloat(document.getElementById("set-retry-threshold").value) / 100,
+    degraded_sustain_minutes: parseInt(document.getElementById("set-degraded-sustain").value, 10),
+    channel_cooldown_minutes: parseInt(document.getElementById("set-cooldown").value, 10),
+    bandwidth_widen_utilization_threshold: parseFloat(document.getElementById("set-widen-threshold").value) / 100,
+    bandwidth_widen_sustain_minutes: parseInt(document.getElementById("set-widen-sustain").value, 10),
+    bandwidth_narrow_utilization_threshold: parseFloat(document.getElementById("set-narrow-threshold").value) / 100,
+    bandwidth_narrow_sustain_minutes: parseInt(document.getElementById("set-narrow-sustain").value, 10),
+  };
+  const resp = await api("/api/settings", { method: "POST", body: JSON.stringify(body) });
+  statusEl.textContent = resp.ok ? "Saved." : "Failed to save - check values.";
+  setTimeout(() => { statusEl.textContent = ""; }, 4000);
+}
+
 function showApp() {
   initCharts();
   refreshAll();
   refreshOptimizerState();
+  loadSettings();
   setInterval(refreshStatus, 15000);
   setInterval(refreshCommands, 15000);
   setInterval(refreshCharts, 30000);
@@ -223,6 +314,7 @@ async function refreshStatus() {
       <div class="card-title">
         <span class="dot ${online ? "online" : "offline"}"></span>
         ${d.role} <span style="color:var(--muted); font-weight:400;">(${d.hostname || d.mac})</span>
+        <button class="reboot-btn" onclick="rebootDevice('${d.mac}', '${d.role}')">Reboot</button>
       </div>
       <div class="kv">
         <div class="k">Last seen</div><div class="v">${timeAgo(d.last_seen)}</div>

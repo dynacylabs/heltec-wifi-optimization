@@ -13,28 +13,41 @@ API_TOKEN = os.environ["API_TOKEN"]
 DEFAULT_COMMAND_TTL_SECONDS = {
     "halow_operating_freq": 120,
     "wifi24_channel": 90,
+    "reboot": 60,
 }
 
-# Rule-based optimizer thresholds. Deliberately simple for v1 - see
-# optimizer.py for why channel/width selection itself is round-robin
-# rather than scan-scored.
-RETRY_RATE_DEGRADED_THRESHOLD = 0.15  # fraction of frames retried
-DEGRADED_SUSTAIN_MINUTES = 10
-CHANNEL_COOLDOWN_MINUTES = 360  # don't re-evaluate more than every 6h
-
-# Bandwidth (widen/narrow) is a bigger, rarer, more disruptive decision
-# than a same-bandwidth channel cycle, so it uses much longer sustain
-# windows rather than just different thresholds - not evaluated at all
-# while the link is currently degraded (see optimizer.py: fixing
-# instability takes priority over widening/narrowing a healthy link).
-# Utilization = throughput_mbps / rate_mbps, i.e. actual data demand
-# against the currently negotiated PHY rate, not a fixed theoretical
-# capacity table.
-BANDWIDTH_WIDEN_UTILIZATION_THRESHOLD = 0.7
-BANDWIDTH_WIDEN_SUSTAIN_MINUTES = 60
-BANDWIDTH_NARROW_UTILIZATION_THRESHOLD = 0.1
-BANDWIDTH_NARROW_SUSTAIN_MINUTES = 1440  # 24h
-
 # Standard non-overlapping 2.4GHz channels (US). Unlike HaLow, there's no
-# bandwidth-dependent numbering complexity here.
+# bandwidth-dependent numbering complexity here. Structural (which channels
+# exist), not a tunable threshold, so it stays here rather than in the
+# DB-backed optimizer_state settings (see optimizer.py).
 WIFI24_CHANNELS = [1, 6, 11]
+
+# All *thresholds* the optimizer uses (retry rate, sustain windows,
+# utilization) now live in the DB (optimizer_state table, tunable from the
+# dashboard's Settings section) instead of here - see optimizer.py and
+# migration 007. What's left here is structural, not something you'd tune
+# per-deployment.
+
+# ntfy (https://ntfy.sh or self-hosted) push alerts for: a device going
+# offline/coming back, a command getting reverted, and sustained
+# degradation triggering an optimizer command. Optional - leave both blank
+# to disable alerting entirely (this repo stays host-agnostic; ntfy is a
+# convenience, not a dependency).
+NTFY_URL = os.environ.get("NTFY_URL", "").rstrip("/")
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
+NTFY_ENABLED = bool(NTFY_URL and NTFY_TOPIC)
+
+# How long a device can go without a telemetry POST before it's considered
+# offline and worth alerting on (vs. the dashboard's 90s "online" dot, which
+# is meant to be a quick glance, not gate a push notification).
+OFFLINE_ALERT_SECONDS = int(os.environ.get("OFFLINE_ALERT_SECONDS", "300"))
+# How often the liveness check runs.
+LIVENESS_CHECK_INTERVAL_SECONDS = int(os.environ.get("LIVENESS_CHECK_INTERVAL_SECONDS", "60"))
+
+# TimescaleDB retention: telemetry/radio_clients rows older than this get
+# dropped automatically so the DB doesn't grow unbounded on a system meant
+# to run unattended for months. Applied idempotently at startup (db.py) via
+# add_retention_policy(if_not_exists=True) - changing this value after the
+# policy already exists requires manually removing the old one first (see
+# README), since if_not_exists won't update an existing policy's interval.
+TELEMETRY_RETENTION_DAYS = int(os.environ.get("TELEMETRY_RETENTION_DAYS", "180"))

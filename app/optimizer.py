@@ -4,17 +4,8 @@ from datetime import datetime, timedelta, timezone
 import asyncpg
 
 import halow_channel_plan
-from config import (
-    BANDWIDTH_NARROW_SUSTAIN_MINUTES,
-    BANDWIDTH_NARROW_UTILIZATION_THRESHOLD,
-    BANDWIDTH_WIDEN_SUSTAIN_MINUTES,
-    BANDWIDTH_WIDEN_UTILIZATION_THRESHOLD,
-    CHANNEL_COOLDOWN_MINUTES,
-    DEFAULT_COMMAND_TTL_SECONDS,
-    DEGRADED_SUSTAIN_MINUTES,
-    RETRY_RATE_DEGRADED_THRESHOLD,
-    WIFI24_CHANNELS,
-)
+from config import DEFAULT_COMMAND_TTL_SECONDS, WIFI24_CHANNELS
+from notify import notify
 
 logger = logging.getLogger("hobocams.optimizer")
 
@@ -24,12 +15,24 @@ BANDWIDTH_TIERS = [1, 2, 4, 8]  # MHz, matches halow_channel_plan.py
 async def run_optimizer_pass(pool: asyncpg.Pool):
     try:
         async with pool.acquire() as conn:
-            enabled = await conn.fetchval("SELECT enabled FROM optimizer_state LIMIT 1")
-        if not enabled:
+            # Thresholds live in the DB (optimizer_state, migration 007) so
+            # they're tunable from the dashboard without a rebuild - see
+            # models.OptimizerSettings. Fetched once per pass and threaded
+            # through rather than re-queried per-link.
+            settings = await conn.fetchrow(
+                """
+                SELECT enabled, retry_rate_degraded_threshold, degraded_sustain_minutes,
+                       channel_cooldown_minutes, bandwidth_widen_utilization_threshold,
+                       bandwidth_widen_sustain_minutes, bandwidth_narrow_utilization_threshold,
+                       bandwidth_narrow_sustain_minutes
+                FROM optimizer_state LIMIT 1
+                """
+            )
+        if not settings["enabled"]:
             logger.info("Optimizer paused via kill switch, skipping this pass")
             return
-        await _evaluate_halow_link(pool)
-        await _evaluate_wifi24_link(pool)
+        await _evaluate_halow_link(pool, settings)
+        await _evaluate_wifi24_link(pool, settings)
     except Exception:
         logger.exception("optimizer pass failed")
 
@@ -51,12 +54,12 @@ async def _avg_over_window(conn, table: str, column: str, where_extra: str, devi
     return (sum(values) / len(values)) if values else None
 
 
-async def _in_cooldown(conn, device_id, param: str) -> bool:
+async def _in_cooldown(conn, device_id, param: str, cooldown_minutes: int) -> bool:
     last_change = await conn.fetchval(
         "SELECT created_at FROM commands WHERE device_id = $1 AND param = $2 ORDER BY created_at DESC LIMIT 1",
         device_id, param,
     )
-    return bool(last_change and datetime.now(timezone.utc) - last_change < timedelta(minutes=CHANNEL_COOLDOWN_MINUTES))
+    return bool(last_change and datetime.now(timezone.utc) - last_change < timedelta(minutes=cooldown_minutes))
 
 
 async def _emit_halow_command(conn, device_id, mac, channel: int, bandwidth_mhz: int, current_channel, current_bw, reason: str):
@@ -75,7 +78,7 @@ async def _emit_halow_command(conn, device_id, mac, channel: int, bandwidth_mhz:
     )
 
 
-async def _evaluate_halow_link(pool: asyncpg.Pool):
+async def _evaluate_halow_link(pool: asyncpg.Pool, settings):
     async with pool.acquire() as conn:
         ap = await conn.fetchrow("SELECT id, mac FROM devices WHERE role = 'AP'")
         if not ap:
@@ -96,14 +99,15 @@ async def _evaluate_halow_link(pool: asyncpg.Pool):
             return
         cur_channel, cur_bw = current["channel"], current["bandwidth_mhz"]
 
-        if await _in_cooldown(conn, ap["id"], "halow_operating_freq"):
+        if await _in_cooldown(conn, ap["id"], "halow_operating_freq", settings["channel_cooldown_minutes"]):
             return
 
         # 1. Degradation takes priority over anything else - widening or
         # narrowing a link that's actively struggling is likely to make
         # things worse, not better.
-        avg_retries = await _avg_over_window(conn, "telemetry", "retries", "AND radio = 'halow'", ap["id"], DEGRADED_SUSTAIN_MINUTES)
-        if avg_retries is not None and avg_retries >= RETRY_RATE_DEGRADED_THRESHOLD:
+        sustain_minutes = settings["degraded_sustain_minutes"]
+        avg_retries = await _avg_over_window(conn, "telemetry", "retries", "AND radio = 'halow'", ap["id"], sustain_minutes)
+        if avg_retries is not None and avg_retries >= settings["retry_rate_degraded_threshold"]:
             # Deliberately simple, not scan-informed: there's no real
             # channel-scan telemetry available on this HaLow driver
             # (iwinfo scan returns empty, confirmed live) - so rather than
@@ -120,7 +124,13 @@ async def _evaluate_halow_link(pool: asyncpg.Pool):
                 next_channel = valid[0]
             await _emit_halow_command(
                 conn, ap["id"], ap["mac"], next_channel, cur_bw, cur_channel, cur_bw,
-                f"degraded (avg retries={avg_retries:.3f} over {DEGRADED_SUSTAIN_MINUTES}m), cycling channel",
+                f"degraded (avg retries={avg_retries:.3f} over {sustain_minutes}m), cycling channel",
+            )
+            await notify(
+                "HoboCams: HaLow link degraded",
+                f"AP {ap['mac']}: sustained avg retries {avg_retries:.1%} over {sustain_minutes}m - "
+                f"cycling channel {cur_channel} -> {next_channel} ({cur_bw}MHz)",
+                priority="high", tags="warning",
             )
             return
 
@@ -129,14 +139,15 @@ async def _evaluate_halow_link(pool: asyncpg.Pool):
         # throughput against the currently negotiated PHY rate, not a
         # fixed theoretical capacity table for the bandwidth.
         if cur_bw != BANDWIDTH_TIERS[-1]:
-            util = await _throughput_utilization(conn, ap["id"], BANDWIDTH_WIDEN_SUSTAIN_MINUTES)
-            if util is not None and util >= BANDWIDTH_WIDEN_UTILIZATION_THRESHOLD:
+            widen_minutes = settings["bandwidth_widen_sustain_minutes"]
+            util = await _throughput_utilization(conn, ap["id"], widen_minutes)
+            if util is not None and util >= settings["bandwidth_widen_utilization_threshold"]:
                 new_bw = BANDWIDTH_TIERS[BANDWIDTH_TIERS.index(cur_bw) + 1]
                 new_channel = _pick_channel_for_bandwidth(new_bw)
                 if new_channel is not None:
                     await _emit_halow_command(
                         conn, ap["id"], ap["mac"], new_channel, new_bw, cur_channel, cur_bw,
-                        f"sustained high utilization ({util:.2f} over {BANDWIDTH_WIDEN_SUSTAIN_MINUTES}m), widening",
+                        f"sustained high utilization ({util:.2f} over {widen_minutes}m), widening",
                     )
                     return
 
@@ -144,14 +155,15 @@ async def _evaluate_halow_link(pool: asyncpg.Pool):
         # it's the more conservative direction (better range/robustness at
         # the cost of throughput headroom we apparently aren't using).
         if cur_bw != BANDWIDTH_TIERS[0]:
-            util = await _throughput_utilization(conn, ap["id"], BANDWIDTH_NARROW_SUSTAIN_MINUTES)
-            if util is not None and util <= BANDWIDTH_NARROW_UTILIZATION_THRESHOLD:
+            narrow_minutes = settings["bandwidth_narrow_sustain_minutes"]
+            util = await _throughput_utilization(conn, ap["id"], narrow_minutes)
+            if util is not None and util <= settings["bandwidth_narrow_utilization_threshold"]:
                 new_bw = BANDWIDTH_TIERS[BANDWIDTH_TIERS.index(cur_bw) - 1]
                 new_channel = _pick_channel_for_bandwidth(new_bw)
                 if new_channel is not None:
                     await _emit_halow_command(
                         conn, ap["id"], ap["mac"], new_channel, new_bw, cur_channel, cur_bw,
-                        f"sustained low utilization ({util:.2f} over {BANDWIDTH_NARROW_SUSTAIN_MINUTES}m), narrowing",
+                        f"sustained low utilization ({util:.2f} over {narrow_minutes}m), narrowing",
                     )
                     return
 
@@ -184,7 +196,7 @@ async def _throughput_utilization(conn, device_id, minutes: int):
     return sum(ratios) / len(ratios)
 
 
-async def _evaluate_wifi24_link(pool: asyncpg.Pool):
+async def _evaluate_wifi24_link(pool: asyncpg.Pool, settings):
     # Same shape as HaLow, but the degradation signal lives in
     # radio_clients (per-client retries), not telemetry - the wifi24 radio
     # itself doesn't have a single "link quality" the way a P2P HaLow link
@@ -196,11 +208,12 @@ async def _evaluate_wifi24_link(pool: asyncpg.Pool):
         if not sta:
             return
 
-        avg_retries = await _avg_over_window(conn, "radio_clients", "retries", "AND radio = 'wifi24'", sta["id"], DEGRADED_SUSTAIN_MINUTES)
-        if avg_retries is None or avg_retries < RETRY_RATE_DEGRADED_THRESHOLD:
+        sustain_minutes = settings["degraded_sustain_minutes"]
+        avg_retries = await _avg_over_window(conn, "radio_clients", "retries", "AND radio = 'wifi24'", sta["id"], sustain_minutes)
+        if avg_retries is None or avg_retries < settings["retry_rate_degraded_threshold"]:
             return
 
-        if await _in_cooldown(conn, sta["id"], "wifi24_channel"):
+        if await _in_cooldown(conn, sta["id"], "wifi24_channel", settings["channel_cooldown_minutes"]):
             logger.info("2.4GHz link degraded but still within cooldown since last change, skipping")
             return
 
@@ -244,5 +257,11 @@ async def _evaluate_wifi24_link(pool: asyncpg.Pool):
         logger.warning(
             "2.4GHz link on STA %s degraded (avg retries=%.3f over last %d min) - "
             "cycling channel %s -> %s",
-            sta["mac"], avg_retries, DEGRADED_SUSTAIN_MINUTES, current_channel, next_channel,
+            sta["mac"], avg_retries, sustain_minutes, current_channel, next_channel,
+        )
+        await notify(
+            "HoboCams: 2.4GHz link degraded",
+            f"STA {sta['mac']}: sustained avg client retries {avg_retries:.1%} over {sustain_minutes}m - "
+            f"cycling channel {current_channel} -> {next_channel}",
+            priority="high", tags="warning",
         )

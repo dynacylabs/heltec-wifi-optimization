@@ -273,6 +273,18 @@ poll_and_apply_command() {
     ttl_seconds="$(echo "$body" | jsonfilter -e '@.ttl_seconds' 2>/dev/null)"
     [ -z "$command_id" ] && return 0
 
+    # reboot has none of the uci apply/rollback/verify machinery below - the
+    # device is about to disappear, so there's nothing to roll back and no
+    # live state left to verify against. Ack first (so the server has
+    # confirmation before we lose the connection), then reboot after a
+    # short delay so the ack request has time to actually complete.
+    if [ "$param" = "reboot" ]; then
+        wget -q -O /dev/null --post-data='{"status":"acked"}' \
+            "$HOBOCAMS_SERVER_URL/commands/$command_id/report?token=$HOBOCAMS_API_TOKEN" 2>/dev/null
+        ( sleep 2; reboot ) &
+        return 0
+    fi
+
     case "$param" in
         halow_operating_freq) apply_halow_operating_freq "$target_value" ;;
         wifi24_channel) apply_wifi24_channel "$target_value" ;;

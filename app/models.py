@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class RadioClient(BaseModel):
@@ -105,3 +105,17 @@ class CommandHistoryEntry(BaseModel):
 
 class OptimizerState(BaseModel):
     enabled: bool
+
+
+class OptimizerSettings(BaseModel):
+    # Tunable optimizer thresholds, stored in optimizer_state (migration
+    # 007) so they can be adjusted from the dashboard without a rebuild.
+    # Bounds are loose sanity checks, not real tuning guidance - see
+    # README/config.py for what "reasonable" looks like.
+    retry_rate_degraded_threshold: float = Field(ge=0, le=1)
+    degraded_sustain_minutes: int = Field(gt=0)
+    channel_cooldown_minutes: int = Field(gt=0)
+    bandwidth_widen_utilization_threshold: float = Field(ge=0, le=1)
+    bandwidth_widen_sustain_minutes: int = Field(gt=0)
+    bandwidth_narrow_utilization_threshold: float = Field(ge=0, le=1)
+    bandwidth_narrow_sustain_minutes: int = Field(gt=0)

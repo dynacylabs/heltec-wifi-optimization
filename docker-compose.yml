@@ -21,6 +21,16 @@ services:
       DATABASE_URL: postgresql://hobocams:changeme@timescaledb:5432/hobocams
       OPTIMIZER_INTERVAL_SECONDS: "300"
       API_TOKEN: changeme
+      # Optional ntfy (https://ntfy.sh or self-hosted) push alerts - device
+      # offline/back online, a command getting reverted, sustained
+      # degradation. Leave both blank to disable alerting entirely.
+      NTFY_URL: ""
+      NTFY_TOPIC: ""
+      OFFLINE_ALERT_SECONDS: "300"
+      LIVENESS_CHECK_INTERVAL_SECONDS: "60"
+      # telemetry/radio_clients rows older than this are dropped
+      # automatically (TimescaleDB retention policy, applied at startup).
+      TELEMETRY_RETENTION_DAYS: "180"
     depends_on:
       - timescaledb
     ports:
