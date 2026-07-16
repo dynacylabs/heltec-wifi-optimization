@@ -106,7 +106,7 @@ async def check_device_liveness(pool):
             """
             SELECT id, mac, hostname, role FROM devices
             WHERE offline_alerted = false
-              AND (last_seen IS NULL OR last_seen < now() - ($1 || ' seconds')::interval)
+              AND (last_seen IS NULL OR last_seen < now() - make_interval(secs => $1))
             """,
             OFFLINE_ALERT_SECONDS,
         )
