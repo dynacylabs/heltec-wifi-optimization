@@ -57,7 +57,10 @@ status page (no Grafana knowledge required) served directly by the app:
   the window edges so an outage right at the start or still ongoing "now"
   both count).
 - **HaLow history charts** — RSSI/noise, retries, bandwidth — over a
-  selectable time range (1h/6h/24h/7d).
+  selectable time range (1h/6h/1d/7d/30d/90d/6mo/12mo). Longer ranges are
+  downsampled server-side (`time_bucket`, capped around 600 points per
+  chart regardless of span) rather than shipping raw 30s-interval rows to
+  the browser — at 12mo that'd be over a million rows per series.
 - **2.4GHz history charts** — channel over time, and per-client RSSI (one
   line per connected device on the STA's downstream SSID, e.g. Blink Sync
   Module, Shelly relay) — a client with no line for a stretch was
@@ -326,10 +329,14 @@ Confirmed live via SSH against an HT-HD01-V2 AP/STA pair running OpenWrt
   channel), not frequency-proximity aware.
 - TX power is intentionally not a lever (no battery/power constraint on
   this particular system — remove this line if that doesn't apply to you).
-- `TELEMETRY_RETENTION_DAYS` (default 180) is applied as a TimescaleDB
-  retention policy at startup, with `if_not_exists => true` so it's safe
-  to call every boot - but that also means changing the value on a
-  deployment that already has the policy won't take effect on its own.
-  To actually change it later:
+- `TELEMETRY_RETENTION_DAYS` (default **0 = keep forever**) is applied as a
+  TimescaleDB retention policy at startup. Setting it to a positive number
+  uses `if_not_exists => true`, so it's safe to call every boot - but that
+  also means changing a *nonzero* value on a deployment that already has
+  the policy won't take effect on its own; you'd need to remove the old
+  one by hand first:
   `docker compose exec timescaledb psql -U hobocams -d hobocams -c "SELECT remove_retention_policy('telemetry'); SELECT remove_retention_policy('radio_clients');"`
   then update `TELEMETRY_RETENTION_DAYS` and restart the `app` service.
+  Setting it *back to 0*, though, is handled automatically - the app
+  removes any existing policy on startup when the value is 0, so you don't
+  need the manual step in that direction.

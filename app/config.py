@@ -50,9 +50,14 @@ OFFLINE_ALERT_SECONDS = int(os.environ.get("OFFLINE_ALERT_SECONDS", "300"))
 LIVENESS_CHECK_INTERVAL_SECONDS = int(os.environ.get("LIVENESS_CHECK_INTERVAL_SECONDS", "60"))
 
 # TimescaleDB retention: telemetry/radio_clients rows older than this get
-# dropped automatically so the DB doesn't grow unbounded on a system meant
-# to run unattended for months. Applied idempotently at startup (db.py) via
-# add_retention_policy(if_not_exists=True) - changing this value after the
-# policy already exists requires manually removing the old one first (see
+# dropped automatically. 0 (the default) means keep everything forever -
+# no retention policy is applied at all, which is the point if you actually
+# want a full history (e.g. year-over-year signal comparison via the
+# dashboard's long-range presets). Applied idempotently at startup (db.py):
+# add_retention_policy(if_not_exists=True) if > 0, remove_retention_policy
+# (if_exists=True) if 0 - so flipping this from a real number back to 0
+# actually removes a previously-applied policy on the next restart, not
+# just skip adding a new one. Changing a *nonzero* value after the policy
+# already exists still requires manually removing the old one first (see
 # README), since if_not_exists won't update an existing policy's interval.
-TELEMETRY_RETENTION_DAYS = int(os.environ.get("TELEMETRY_RETENTION_DAYS", "180"))
+TELEMETRY_RETENTION_DAYS = int(os.environ.get("TELEMETRY_RETENTION_DAYS", "0"))

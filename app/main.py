@@ -258,8 +258,13 @@ async def _uptime_pct(conn, device_id: int, hours: float) -> float:
     return max(0.0, min(100.0, 100.0 * (1 - float(downtime_seconds) / window_seconds)))
 
 
+# Longest selectable range is 12mo; the extra headroom past exactly 365
+# days is just slop for callers computing "12mo" as 366d/leap years/etc.
+MAX_HOURS = 24 * 400
+
+
 @app.get("/api/status", response_model=list[DeviceStatus], dependencies=[Depends(require_token)])
-async def get_status(hours: float = Query(default=24, gt=0, le=24 * 30)):
+async def get_status(hours: float = Query(default=24, gt=0, le=MAX_HOURS)):
     pool = await get_pool()
     async with pool.acquire() as conn:
         devices = await conn.fetch("SELECT id, mac, role, hostname, last_seen FROM devices ORDER BY role")
@@ -302,22 +307,46 @@ async def get_status(hours: float = Query(default=24, gt=0, le=24 * 30)):
         return result
 
 
+# Every chart-data endpoint downsamples to roughly this many points
+# regardless of the selected range, via TimescaleDB's time_bucket(). Without
+# this, a 12mo range at one telemetry row per ~30s is 1M+ rows per
+# radio/device - far too much to query, ship to the browser, or render in
+# Chart.js. At short ranges the computed bucket width collapses back below
+# the real ~30s poll interval, so bucketing is a no-op there (every bucket
+# holds at most one real row) - one code path handles both cases.
+TARGET_CHART_POINTS = 600
+
+
+def _bucket_seconds(hours: float) -> int:
+    return max(30, int((hours * 3600) / TARGET_CHART_POINTS))
+
+
 @app.get("/api/telemetry/{device_mac}", response_model=list[TelemetryPoint], dependencies=[Depends(require_token)])
 async def get_telemetry_history(
     device_mac: str,
     radio: str = Query(pattern="^(halow|wifi24)$"),
-    hours: float = Query(default=6, gt=0, le=24 * 30),
+    hours: float = Query(default=6, gt=0, le=MAX_HOURS),
 ):
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT t.time, t.rssi, t.noise, t.mcs, t.rate_mbps, t.retries, t.channel, t.bandwidth_mhz, t.throughput_mbps
+            SELECT
+                time_bucket(make_interval(secs => $4), t.time) AS time,
+                avg(t.rssi) AS rssi,
+                avg(t.noise) AS noise,
+                avg(t.mcs) AS mcs,
+                avg(t.rate_mbps) AS rate_mbps,
+                avg(t.retries) AS retries,
+                last(t.channel, t.time) AS channel,
+                last(t.bandwidth_mhz, t.time) AS bandwidth_mhz,
+                avg(t.throughput_mbps) AS throughput_mbps
             FROM telemetry t JOIN devices d ON d.id = t.device_id
-            WHERE d.mac = $1 AND t.radio = $2 AND t.time > now() - ($3 || ' hours')::interval
-            ORDER BY t.time ASC
+            WHERE d.mac = $1 AND t.radio = $2 AND t.time > now() - make_interval(secs => $3)
+            GROUP BY 1
+            ORDER BY 1 ASC
             """,
-            device_mac, radio, str(hours),
+            device_mac, radio, hours * 3600, _bucket_seconds(hours),
         )
         return [TelemetryPoint(**dict(r)) for r in rows]
 
@@ -326,18 +355,25 @@ async def get_telemetry_history(
 async def get_radio_client_history(
     device_mac: str,
     radio: str = Query(default="wifi24", pattern="^(halow|wifi24)$"),
-    hours: float = Query(default=6, gt=0, le=24 * 30),
+    hours: float = Query(default=6, gt=0, le=MAX_HOURS),
 ):
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT rc.time, rc.client_mac, rc.host, rc.rssi, rc.rate_mbps, rc.retries
+            SELECT
+                time_bucket(make_interval(secs => $4), rc.time) AS time,
+                rc.client_mac,
+                max(rc.host) AS host,
+                avg(rc.rssi) AS rssi,
+                avg(rc.rate_mbps) AS rate_mbps,
+                avg(rc.retries) AS retries
             FROM radio_clients rc JOIN devices d ON d.id = rc.device_id
-            WHERE d.mac = $1 AND rc.radio = $2 AND rc.time > now() - ($3 || ' hours')::interval
-            ORDER BY rc.time ASC
+            WHERE d.mac = $1 AND rc.radio = $2 AND rc.time > now() - make_interval(secs => $3)
+            GROUP BY 1, rc.client_mac
+            ORDER BY 1 ASC
             """,
-            device_mac, radio, str(hours),
+            device_mac, radio, hours * 3600, _bucket_seconds(hours),
         )
         return [RadioClientPoint(**dict(r)) for r in rows]
 

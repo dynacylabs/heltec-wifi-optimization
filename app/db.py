@@ -34,16 +34,24 @@ async def close_pool():
 
 
 async def ensure_retention_policies(pool: asyncpg.Pool):
-    # if_not_exists=True makes this safe to call on every startup, but means
-    # it won't pick up a *changed* TELEMETRY_RETENTION_DAYS on a deployment
-    # that already has the policy - see config.py's comment and the README
-    # for how to change it after the fact.
+    # TELEMETRY_RETENTION_DAYS <= 0 means "keep everything forever" - remove
+    # any existing policy rather than just skipping adding one, so flipping
+    # this back to 0 on a deployment that already has a real policy actually
+    # takes effect on the next restart instead of silently doing nothing.
+    # For a nonzero value, if_not_exists=True makes this safe to call every
+    # startup, but won't pick up a *changed* value once the policy already
+    # exists - see config.py's comment and the README for how to change it.
     async with pool.acquire() as conn:
         for table in ("telemetry", "radio_clients"):
             try:
-                await conn.execute(
-                    "SELECT add_retention_policy($1::regclass, make_interval(days => $2), if_not_exists => true)",
-                    table, TELEMETRY_RETENTION_DAYS,
-                )
+                if TELEMETRY_RETENTION_DAYS > 0:
+                    await conn.execute(
+                        "SELECT add_retention_policy($1::regclass, make_interval(days => $2), if_not_exists => true)",
+                        table, TELEMETRY_RETENTION_DAYS,
+                    )
+                else:
+                    await conn.execute(
+                        "SELECT remove_retention_policy($1::regclass, if_exists => true)", table,
+                    )
             except Exception:
                 logger.exception("failed to ensure retention policy on %s", table)

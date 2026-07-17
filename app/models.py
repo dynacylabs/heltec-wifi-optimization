@@ -68,10 +68,15 @@ class DeviceStatus(BaseModel):
 
 
 class TelemetryPoint(BaseModel):
+    # rssi/noise/mcs are float here (unlike RadioSnapshot's int) because
+    # get_telemetry_history now averages them across a time_bucket - only
+    # channel/bandwidth_mhz stay int, since those use last() (the literal
+    # value at the end of the bucket) rather than an average, since they're
+    # discrete state, not a continuous metric.
     time: datetime
-    rssi: Optional[int] = None
-    noise: Optional[int] = None
-    mcs: Optional[int] = None
+    rssi: Optional[float] = None
+    noise: Optional[float] = None
+    mcs: Optional[float] = None
     rate_mbps: Optional[float] = None
     retries: Optional[float] = None
     channel: Optional[int] = None
@@ -80,10 +85,12 @@ class TelemetryPoint(BaseModel):
 
 
 class RadioClientPoint(BaseModel):
+    # rssi is float, not int, for the same reason as TelemetryPoint above -
+    # get_radio_client_history averages it across a time_bucket.
     time: datetime
     client_mac: str
     host: Optional[str] = None
-    rssi: Optional[int] = None
+    rssi: Optional[float] = None
     rate_mbps: Optional[float] = None
     retries: Optional[float] = None
 

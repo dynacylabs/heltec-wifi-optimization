@@ -33,7 +33,8 @@ services:
       LIVENESS_CHECK_INTERVAL_SECONDS: "60"
       # telemetry/radio_clients rows older than this are dropped
       # automatically (TimescaleDB retention policy, applied at startup).
-      TELEMETRY_RETENTION_DAYS: "180"
+      # 0 = keep everything forever (no policy applied).
+      TELEMETRY_RETENTION_DAYS: "0"
     depends_on:
       - timescaledb
     ports:
