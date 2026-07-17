@@ -34,7 +34,7 @@
     background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
     padding: 16px 20px; min-width: 260px; flex: 1;
   }
-  .card-title { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+  .card-title { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 600; margin-bottom: 12px; flex-wrap: wrap; }
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
   .dot.online { background: var(--green); box-shadow: 0 0 6px var(--green); }
   .dot.offline { background: var(--red); }
@@ -64,7 +64,7 @@
   code { background: rgba(110,118,129,0.15); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
   .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
   .kill-switch {
-    display: flex; align-items: center; gap: 14px; background: var(--panel);
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap; background: var(--panel);
     border: 1px solid var(--border); border-radius: 8px; padding: 12px 18px; margin-bottom: 20px;
   }
   .kill-switch .status-text { font-weight: 600; font-size: 14px; }
@@ -81,36 +81,53 @@
     font-size: 11px; padding: 3px 8px; border-radius: 5px; cursor: pointer;
   }
   .reboot-btn:hover { color: var(--text); border-color: var(--text); }
-  .settings-box { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 18px 22px; max-width: 640px; }
-  .settings-row {
-    display: flex; justify-content: space-between; align-items: center; gap: 16px;
-    padding: 11px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+  .settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 16px;
   }
-  .settings-row:last-of-type { border-bottom: none; }
-  .settings-row .settings-input {
-    display: flex; align-items: center; justify-content: flex-end; gap: 8px;
-    width: 108px; flex-shrink: 0; color: var(--muted);
+  .settings-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 18px;
   }
-  .settings-row input[type="number"] {
+  .settings-card-title {
+    font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase;
+    letter-spacing: 0.04em; margin-bottom: 10px;
+  }
+  .settings-field {
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  .settings-field:last-child { border-bottom: none; }
+  .settings-field label { flex: 1; min-width: 0; }
+  .settings-field .settings-input {
+    display: flex; align-items: center; gap: 6px;
+    flex-shrink: 0; color: var(--muted);
+  }
+  .settings-field input[type="number"] {
     width: 62px; background: var(--bg); border: 1px solid var(--border); color: var(--text);
     border-radius: 4px; padding: 5px 8px; text-align: right; font-variant-numeric: tabular-nums;
     font-size: 13px; font-family: inherit;
     -moz-appearance: textfield; appearance: textfield;
   }
-  .settings-row input[type="number"]::-webkit-outer-spin-button,
-  .settings-row input[type="number"]::-webkit-inner-spin-button {
+  .settings-field input[type="number"]::-webkit-outer-spin-button,
+  .settings-field input[type="number"]::-webkit-inner-spin-button {
     -webkit-appearance: none;
     margin: 0;
   }
-  .settings-row input[type="number"]:focus {
+  .settings-field input[type="number"]:focus {
     outline: none; border-color: var(--accent);
   }
-  .settings-actions { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
+  .settings-actions { display: flex; align-items: center; gap: 12px; margin-top: 18px; }
   .settings-actions button {
     padding: 8px 16px; border-radius: 6px; border: none; font-weight: 600; font-size: 13px;
     cursor: pointer; background: var(--accent); color: #0d1117;
   }
   .settings-status { font-size: 12px; color: var(--muted); }
+  .table-scroll { overflow-x: auto; }
+  @media (max-width: 480px) {
+    body { padding: 14px; }
+  }
 </style>
 </head>
 <body>
@@ -170,37 +187,51 @@
   </div>
 
   <h2>Command History</h2>
-  <div id="command-history"></div>
+  <div class="table-scroll" id="command-history"></div>
 
   <h2>Optimizer Settings</h2>
-  <div class="settings-box" id="settings-box">
-    <div class="settings-row">
-      <span>Degradation trigger: retry rate above</span>
-      <span class="settings-input"><input type="number" id="set-retry-threshold" min="0" max="100" step="1">%</span>
-    </div>
-    <div class="settings-row">
-      <span>...sustained for</span>
-      <span class="settings-input"><input type="number" id="set-degraded-sustain" min="1" step="1">minutes</span>
-    </div>
-    <div class="settings-row">
-      <span>Cooldown between channel changes</span>
-      <span class="settings-input"><input type="number" id="set-cooldown" min="1" step="1">minutes</span>
-    </div>
-    <div class="settings-row">
-      <span>Widen HaLow bandwidth when utilization above</span>
-      <span class="settings-input"><input type="number" id="set-widen-threshold" min="0" max="100" step="1">%</span>
-    </div>
-    <div class="settings-row">
-      <span>...sustained for</span>
-      <span class="settings-input"><input type="number" id="set-widen-sustain" min="1" step="1">minutes</span>
-    </div>
-    <div class="settings-row">
-      <span>Narrow HaLow bandwidth when utilization below</span>
-      <span class="settings-input"><input type="number" id="set-narrow-threshold" min="0" max="100" step="1">%</span>
-    </div>
-    <div class="settings-row">
-      <span>...sustained for</span>
-      <span class="settings-input"><input type="number" id="set-narrow-sustain" min="1" step="1">minutes</span>
+  <div id="settings-box">
+    <div class="settings-grid">
+      <div class="settings-card">
+        <div class="settings-card-title">Degradation Detection</div>
+        <div class="settings-field">
+          <label for="set-retry-threshold">Retry rate above</label>
+          <span class="settings-input"><input type="number" id="set-retry-threshold" min="0" max="100" step="1">%</span>
+        </div>
+        <div class="settings-field">
+          <label for="set-degraded-sustain">Sustained for</label>
+          <span class="settings-input"><input type="number" id="set-degraded-sustain" min="1" step="1">min</span>
+        </div>
+      </div>
+      <div class="settings-card">
+        <div class="settings-card-title">Change Cooldown</div>
+        <div class="settings-field">
+          <label for="set-cooldown">Between channel changes</label>
+          <span class="settings-input"><input type="number" id="set-cooldown" min="1" step="1">min</span>
+        </div>
+      </div>
+      <div class="settings-card">
+        <div class="settings-card-title">Widen HaLow Bandwidth</div>
+        <div class="settings-field">
+          <label for="set-widen-threshold">Utilization above</label>
+          <span class="settings-input"><input type="number" id="set-widen-threshold" min="0" max="100" step="1">%</span>
+        </div>
+        <div class="settings-field">
+          <label for="set-widen-sustain">Sustained for</label>
+          <span class="settings-input"><input type="number" id="set-widen-sustain" min="1" step="1">min</span>
+        </div>
+      </div>
+      <div class="settings-card">
+        <div class="settings-card-title">Narrow HaLow Bandwidth</div>
+        <div class="settings-field">
+          <label for="set-narrow-threshold">Utilization below</label>
+          <span class="settings-input"><input type="number" id="set-narrow-threshold" min="0" max="100" step="1">%</span>
+        </div>
+        <div class="settings-field">
+          <label for="set-narrow-sustain">Sustained for</label>
+          <span class="settings-input"><input type="number" id="set-narrow-sustain" min="1" step="1">min</span>
+        </div>
+      </div>
     </div>
     <div class="settings-actions">
       <button onclick="saveSettings()">Save Settings</button>
