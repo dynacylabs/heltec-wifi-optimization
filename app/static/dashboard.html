@@ -128,6 +128,31 @@
   @media (max-width: 480px) {
     body { padding: 14px; }
   }
+  /* Below this width a wide table has nowhere good to go - even contained
+     within a scrollable div, a horizontally-scrolling table has no visible
+     affordance on mobile (no scrollbar hint), so cut-off content just
+     looks broken. Instead, restructure each row into a stacked label:value
+     card - the standard CSS-only responsive-table technique. Requires
+     `data-label` on each <td>, set in refreshCommands(). */
+  @media (max-width: 700px) {
+    .table-scroll table, .table-scroll thead, .table-scroll tbody,
+    .table-scroll th, .table-scroll td, .table-scroll tr {
+      display: block;
+    }
+    .table-scroll thead { position: absolute; left: -9999px; }
+    .table-scroll tbody { display: flex; flex-direction: column; gap: 10px; }
+    .table-scroll tr {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 4px 14px;
+    }
+    .table-scroll td {
+      display: flex; justify-content: space-between; align-items: center; gap: 12px;
+      padding: 8px 0; border-bottom: 1px solid var(--border); text-align: right;
+    }
+    .table-scroll td:last-child { border-bottom: none; }
+    .table-scroll td::before {
+      content: attr(data-label); color: var(--muted); font-weight: 500; text-align: left; flex-shrink: 0;
+    }
+  }
 </style>
 </head>
 <body>
@@ -555,12 +580,12 @@ async function refreshCommands() {
   }
   const rows = commands.map(c => `
     <tr>
-      <td>${new Date(c.created_at).toLocaleString()}</td>
-      <td>${c.device_role}</td>
-      <td>${c.param}</td>
-      <td><code>${JSON.stringify(c.target_value)}</code></td>
-      <td>${statusBadge(c.status)}</td>
-      <td>${c.reason || "—"}</td>
+      <td data-label="Time">${new Date(c.created_at).toLocaleString()}</td>
+      <td data-label="Device">${c.device_role}</td>
+      <td data-label="Param">${c.param}</td>
+      <td data-label="Target"><code>${JSON.stringify(c.target_value)}</code></td>
+      <td data-label="Status">${statusBadge(c.status)}</td>
+      <td data-label="Reason">${c.reason || "—"}</td>
     </tr>
   `).join("");
   container.innerHTML = `
