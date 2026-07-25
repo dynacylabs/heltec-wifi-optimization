@@ -1,0 +1,4 @@
+# Copy to /etc/wifi-agent.conf on each device and edit per-device.
+AGENT_ROLE=AP
+AGENT_SERVER_URL=http://192.168.2.1:8080
+AGENT_API_TOKEN=changeme

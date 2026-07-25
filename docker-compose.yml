@@ -3,9 +3,9 @@ services:
     image: timescale/timescaledb:latest-pg16
     restart: unless-stopped
     environment:
-      POSTGRES_USER: hobocams
+      POSTGRES_USER: wifioptimizer
       POSTGRES_PASSWORD: changeme
-      POSTGRES_DB: hobocams
+      POSTGRES_DB: wifioptimizer
     volumes:
       - timescale_data:/var/lib/postgresql/data
       - ./db/migrations:/docker-entrypoint-initdb.d
@@ -18,7 +18,7 @@ services:
     build: ./app
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://hobocams:changeme@timescaledb:5432/hobocams
+      DATABASE_URL: postgresql://wifioptimizer:changeme@timescaledb:5432/wifioptimizer
       OPTIMIZER_INTERVAL_SECONDS: "300"
       API_TOKEN: changeme
       # Optional ntfy (https://ntfy.sh or self-hosted) push alerts - device
@@ -42,27 +42,8 @@ services:
     networks:
       - internal
 
-  grafana:
-    image: grafana/grafana:latest
-    restart: unless-stopped
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: changeme
-      POSTGRES_DB: hobocams
-      POSTGRES_USER: hobocams
-      POSTGRES_PASSWORD: changeme
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning
-    depends_on:
-      - timescaledb
-    ports:
-      - "3000:3000"
-    networks:
-      - internal
-
 networks:
   internal:
 
 volumes:
   timescale_data:
-  grafana_data:

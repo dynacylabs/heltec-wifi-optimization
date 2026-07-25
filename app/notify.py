@@ -4,7 +4,7 @@ import httpx
 
 from config import NTFY_ENABLED, NTFY_TOKEN, NTFY_TOPIC, NTFY_URL
 
-logger = logging.getLogger("hobocams.notify")
+logger = logging.getLogger("wifi_optimizer.notify")
 
 
 async def notify(title: str, message: str, priority: str = "default", tags: str | None = None):

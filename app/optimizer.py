@@ -7,7 +7,7 @@ import halow_channel_plan
 from config import DEFAULT_COMMAND_TTL_SECONDS, WIFI24_CHANNELS
 from notify import notify
 
-logger = logging.getLogger("hobocams.optimizer")
+logger = logging.getLogger("wifi_optimizer.optimizer")
 
 BANDWIDTH_TIERS = [1, 2, 4, 8]  # MHz, matches halow_channel_plan.py
 
@@ -153,7 +153,7 @@ async def _evaluate_halow_link(pool: asyncpg.Pool, settings):
                 f"degraded (avg retries={avg_retries:.3f} over {sustain_minutes}m), cycling channel",
             )
             await notify(
-                "HoboCams: HaLow link degraded",
+                "WiFi Optimizer: HaLow link degraded",
                 f"AP {ap['mac']}: sustained avg retries {avg_retries:.1%} over {sustain_minutes}m - "
                 f"cycling channel {cur_channel} -> {next_channel} ({cur_bw}MHz)",
                 priority="high", tags="warning",
@@ -243,7 +243,7 @@ async def _evaluate_wifi24_link(pool: asyncpg.Pool, settings):
     # Same shape as HaLow, but the degradation signal lives in
     # radio_clients (per-client retries), not telemetry - the wifi24 radio
     # itself doesn't have a single "link quality" the way a P2P HaLow link
-    # does; it's whatever its Blink/Shelly clients are experiencing. No
+    # does; it's whatever its downstream 2.4GHz clients are experiencing. No
     # bandwidth lever here - standard Wi-Fi channels don't have HaLow's
     # bandwidth-dependent numbering, so there's nothing to widen/narrow.
     async with pool.acquire() as conn:
@@ -313,7 +313,7 @@ async def _evaluate_wifi24_link(pool: asyncpg.Pool, settings):
             sta["mac"], avg_retries, sustain_minutes, current_channel, next_channel,
         )
         await notify(
-            "HoboCams: 2.4GHz link degraded",
+            "WiFi Optimizer: 2.4GHz link degraded",
             f"STA {sta['mac']}: sustained avg client retries {avg_retries:.1%} over {sustain_minutes}m - "
             f"cycling channel {current_channel} -> {next_channel}",
             priority="high", tags="warning",

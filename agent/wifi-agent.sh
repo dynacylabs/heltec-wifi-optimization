@@ -1,8 +1,8 @@
 #!/bin/sh
-# hobocams-agent.sh - telemetry + command agent for Heltec HT-HD01-V2
+# wifi-agent.sh - telemetry + command agent for Heltec HT-HD01-V2
 #
-# Deploy under /usr/bin/hobocams-agent.sh, run via the hobocams-agent init
-# script (procd), configured per-device by /etc/hobocams-agent.conf.
+# Deploy under /usr/bin/wifi-agent.sh, run via the wifi-agent init
+# script (procd), configured per-device by /etc/wifi-agent.conf.
 #
 # Every command/field below was verified live via SSH on the actual AP
 # (192.168.2.2) and STA (192.168.2.3), OpenWrt 23.05.5 / firmware
@@ -52,13 +52,13 @@
 #     HaLow radio itself actually changed, since that path doesn't go
 #     through HaLow at all.
 
-: "${HOBOCAMS_SERVER_URL:?set HOBOCAMS_SERVER_URL, e.g. http://masha.lan:8080}"
-: "${HOBOCAMS_ROLE:?set HOBOCAMS_ROLE=AP or STA}"
-: "${HOBOCAMS_API_TOKEN:?set HOBOCAMS_API_TOKEN to the shared secret}"
+: "${AGENT_SERVER_URL:?set AGENT_SERVER_URL, e.g. http://192.168.2.1:8080}"
+: "${AGENT_ROLE:?set AGENT_ROLE=AP or STA}"
+: "${AGENT_API_TOKEN:?set AGENT_API_TOKEN to the shared secret}"
 
 MAC="$(cat /sys/class/net/eth0/address)"
 DEVICE_HOSTNAME="$(uci get system.@system[0].hostname 2>/dev/null)"
-STATE_DIR=/tmp/hobocams
+STATE_DIR=/tmp/wifi-agent
 mkdir -p "$STATE_DIR"
 
 # Emit a JSON-safe value: the value itself, or the literal `null`.
@@ -103,7 +103,7 @@ verify_and_recover_radio() {
         wait_attempt=$((wait_attempt + 1))
     done
     if [ -z "$ifname" ]; then
-        logger -t hobocams-agent "verify_and_recover_radio: HaLow ifname never appeared after 30s, giving up"
+        logger -t wifi-agent "verify_and_recover_radio: HaLow ifname never appeared after 30s, giving up"
         return 1
     fi
     expected_channel="$(uci get wireless.radio1.channel 2>/dev/null)"
@@ -113,10 +113,10 @@ verify_and_recover_radio() {
     while [ "$attempt" -le 3 ]; do
         live_channel="$(ubus call iwinfo info "{\"device\":\"$ifname\"}" 2>/dev/null | jsonfilter -e '@.channel' 2>/dev/null)"
         if [ "$live_channel" = "$expected_channel" ]; then
-            logger -t hobocams-agent "HaLow radio confirmed on configured channel $expected_channel"
+            logger -t wifi-agent "HaLow radio confirmed on configured channel $expected_channel"
             return 0
         fi
-        logger -t hobocams-agent "HaLow radio on channel ${live_channel:-none}, expected $expected_channel (recovery attempt $attempt/3) - hard-resetting chip"
+        logger -t wifi-agent "HaLow radio on channel ${live_channel:-none}, expected $expected_channel (recovery attempt $attempt/3) - hard-resetting chip"
         wifi down radio1 2>/dev/null
         sleep 2
         [ -x /morse/scripts/chipreset.sh ] && sh /morse/scripts/chipreset.sh 2>/dev/null
@@ -131,7 +131,7 @@ verify_and_recover_radio() {
         attempt=$((attempt + 1))
     done
 
-    logger -t hobocams-agent "HaLow radio FAILED to reach configured channel $expected_channel after 3 recovery attempts - manual intervention likely needed"
+    logger -t wifi-agent "HaLow radio FAILED to reach configured channel $expected_channel after 3 recovery attempts - manual intervention likely needed"
     return 1
 }
 
@@ -268,8 +268,8 @@ collect_wifi24() {
 post_telemetry() {
     halow_json="$(collect_halow)"
     wifi24_json="$(collect_wifi24)"
-    payload="{\"device_mac\":\"$MAC\",\"hostname\":\"$DEVICE_HOSTNAME\",\"role\":\"$HOBOCAMS_ROLE\",\"radios\":[$halow_json,$wifi24_json]}"
-    wget -q -O /dev/null --post-data="$payload" "$HOBOCAMS_SERVER_URL/telemetry?token=$HOBOCAMS_API_TOKEN" 2>/dev/null
+    payload="{\"device_mac\":\"$MAC\",\"hostname\":\"$DEVICE_HOSTNAME\",\"role\":\"$AGENT_ROLE\",\"radios\":[$halow_json,$wifi24_json]}"
+    wget -q -O /dev/null --post-data="$payload" "$AGENT_SERVER_URL/telemetry?token=$AGENT_API_TOKEN" 2>/dev/null
 }
 
 apply_halow_operating_freq() {
@@ -316,7 +316,7 @@ verify_command_applied() {
         peer_mac="$(ubus call iwinfo assoclist "{\"device\":\"$ifname\"}" 2>/dev/null | jsonfilter -e '@.results[0].mac' 2>/dev/null)"
         [ -z "$peer_mac" ] && return 1
     fi
-    # wifi24_channel has no equivalent check: Blink/Shelly clients are
+    # wifi24_channel has no equivalent check: downstream 2.4GHz clients are
     # transient (can legitimately be idle/off), so "zero clients right
     # now" doesn't mean the change failed the way "zero HaLow peers" does
     # on a link that's supposed to always have exactly one.
@@ -325,7 +325,7 @@ verify_command_applied() {
 }
 
 poll_and_apply_command() {
-    body="$(wget -q -O - "$HOBOCAMS_SERVER_URL/commands/$MAC?token=$HOBOCAMS_API_TOKEN" 2>/dev/null)"
+    body="$(wget -q -O - "$AGENT_SERVER_URL/commands/$MAC?token=$AGENT_API_TOKEN" 2>/dev/null)"
     [ -z "$body" ] && return 0
 
     command_id="$(echo "$body" | jsonfilter -e '@.command_id' 2>/dev/null)"
@@ -341,7 +341,7 @@ poll_and_apply_command() {
     # short delay so the ack request has time to actually complete.
     if [ "$param" = "reboot" ]; then
         wget -q -O /dev/null --post-data='{"status":"acked"}' \
-            "$HOBOCAMS_SERVER_URL/commands/$command_id/report?token=$HOBOCAMS_API_TOKEN" 2>/dev/null
+            "$AGENT_SERVER_URL/commands/$command_id/report?token=$AGENT_API_TOKEN" 2>/dev/null
         ( sleep 2; reboot ) &
         return 0
     fi
@@ -365,11 +365,11 @@ poll_and_apply_command() {
     (
         sleep 25
         if verify_command_applied "$param" "$target_value"; then
-            if [ -n "$(wget -q -O - "$HOBOCAMS_SERVER_URL/health" 2>/dev/null)" ]; then
+            if [ -n "$(wget -q -O - "$AGENT_SERVER_URL/health" 2>/dev/null)" ]; then
                 ubus call uci confirm '{}'
                 touch "$STATE_DIR/cmd-$command_id.reported"
                 wget -q -O /dev/null --post-data='{"status":"acked"}' \
-                    "$HOBOCAMS_SERVER_URL/commands/$command_id/report?token=$HOBOCAMS_API_TOKEN" 2>/dev/null
+                    "$AGENT_SERVER_URL/commands/$command_id/report?token=$AGENT_API_TOKEN" 2>/dev/null
             fi
         else
             # Config committed but the radio never actually reached the
@@ -379,7 +379,7 @@ poll_and_apply_command() {
             # timeout.
             touch "$STATE_DIR/cmd-$command_id.reported"
             wget -q -O /dev/null --post-data='{"status":"reverted","reason":"target value not reached after apply"}' \
-                "$HOBOCAMS_SERVER_URL/commands/$command_id/report?token=$HOBOCAMS_API_TOKEN" 2>/dev/null
+                "$AGENT_SERVER_URL/commands/$command_id/report?token=$AGENT_API_TOKEN" 2>/dev/null
         fi
     ) &
 
@@ -387,7 +387,7 @@ poll_and_apply_command() {
         sleep "$((ttl_seconds + 15))"
         if [ ! -f "$STATE_DIR/cmd-$command_id.reported" ]; then
             wget -q -O /dev/null --post-data='{"status":"reverted","reason":"no ack within ttl_seconds"}' \
-                "$HOBOCAMS_SERVER_URL/commands/$command_id/report?token=$HOBOCAMS_API_TOKEN" 2>/dev/null
+                "$AGENT_SERVER_URL/commands/$command_id/report?token=$AGENT_API_TOKEN" 2>/dev/null
         fi
     ) &
 }

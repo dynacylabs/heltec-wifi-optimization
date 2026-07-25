@@ -32,7 +32,7 @@ from notify import notify
 from optimizer import run_optimizer_pass
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("hobocams")
+logger = logging.getLogger("wifi_optimizer")
 
 scheduler = AsyncIOScheduler()
 
@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI):
     await close_pool()
 
 
-app = FastAPI(title="hobo-cams-brain", lifespan=lifespan)
+app = FastAPI(title="heltec-wifi-optimizer", lifespan=lifespan)
 
 
 async def require_token(token: str):
@@ -83,7 +83,7 @@ async def _get_or_create_device(pool, mac: str, role: str | None, hostname: str 
                 # and let whoever got paged know it's over.
                 await conn.execute("UPDATE devices SET offline_alerted = false WHERE id = $1", row["id"])
                 await notify(
-                    f"HoboCams: {row['role']} {hostname or mac} back online",
+                    f"WiFi Optimizer: {row['role']} {hostname or mac} back online",
                     "Telemetry resumed after an outage.",
                     tags="white_check_mark",
                 )
@@ -113,7 +113,7 @@ async def check_device_liveness(pool):
         for d in stale:
             await conn.execute("UPDATE devices SET offline_alerted = true WHERE id = $1", d["id"])
             await notify(
-                f"HoboCams: {d['role']} {d['hostname'] or d['mac']} offline",
+                f"WiFi Optimizer: {d['role']} {d['hostname'] or d['mac']} offline",
                 f"No telemetry received in over {OFFLINE_ALERT_SECONDS}s.",
                 priority="high",
                 tags="warning",
@@ -211,7 +211,7 @@ async def report_command(command_id: int, request: Request):
                 )
                 if info:
                     await notify(
-                        f"HoboCams: {info['role']} command reverted",
+                        f"WiFi Optimizer: {info['role']} command reverted",
                         f"{info['param']} -> {info['target_value']} was reverted: {report.reason or 'no reason given'}",
                         priority="high",
                         tags="rotating_light",

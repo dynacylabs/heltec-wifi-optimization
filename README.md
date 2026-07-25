@@ -23,12 +23,12 @@ uncommitted edit, or maintain them in a private fork/branch.
 
 1. Clone this repo wherever you want to run it.
 2. Edit `docker-compose.yml` and replace every `changeme` with a real
-   value (`POSTGRES_PASSWORD` appears in three places and must match
-   across all of them; `GF_SECURITY_ADMIN_PASSWORD` is independent).
+   value (`POSTGRES_PASSWORD` is set on `timescaledb` and must match the
+   password embedded in the `app` service's `DATABASE_URL`).
    Also set `API_TOKEN` on the `app` service — this is the shared secret
    every device-facing endpoint requires (see "API authentication"
    below) — and use the *same* value when configuring
-   `HOBOCAMS_API_TOKEN` in each device's `/etc/hobocams-agent.conf`.
+   `AGENT_API_TOKEN` in each device's `/etc/wifi-agent.conf`.
    Optionally set `NTFY_URL`/`NTFY_TOPIC` for push alerts — see
    "Alerting" below.
 3. `docker compose up -d --build`
@@ -37,18 +37,16 @@ uncommitted edit, or maintain them in a private fork/branch.
      volume). On an **existing** deployment (data volume already has
      data), Postgres won't re-run these — apply any new migration files
      by hand, e.g.:
-     `docker compose exec -T timescaledb psql -U hobocams -d hobocams < db/migrations/005_add_offline_alerted.sql`
+     `docker compose exec -T timescaledb psql -U wifioptimizer -d wifioptimizer < db/migrations/005_add_offline_alerted.sql`
      (repeat for each new numbered file you haven't applied yet).
 4. Check `http://<host>:8080/health` returns `{"status": "ok"}`.
-5. Grafana at `http://<host>:3000` (login `admin` / whatever you set for
-   `GF_SECURITY_ADMIN_PASSWORD`) — the TimescaleDB datasource and a starter
-   "HoboCams Overview" dashboard are already provisioned. Optional — see
-   the built-in status page below for day-to-day troubleshooting instead.
+5. `http://<host>:8080/` (redirects to `/dashboard`) is the built-in status
+   page — see below for what it shows.
 
 ## Status page
 
 `http://<host>:8080/` (redirects to `/dashboard`) is a self-contained
-status page (no Grafana knowledge required) served directly by the app:
+status page served directly by the app:
 
 - **Live status cards** — online/offline per device, current HaLow
   channel/bandwidth/RSSI/noise/rate/retries, current 2.4GHz channel and
@@ -62,8 +60,8 @@ status page (no Grafana knowledge required) served directly by the app:
   chart regardless of span) rather than shipping raw 30s-interval rows to
   the browser — at 12mo that'd be over a million rows per series.
 - **2.4GHz history charts** — channel over time, and per-client RSSI (one
-  line per connected device on the STA's downstream SSID, e.g. Blink Sync
-  Module, Shelly relay) — a client with no line for a stretch was
+  line per connected device on the STA's downstream SSID) — a client with
+  no line for a stretch was
   disconnected during that window.
 - **Command history table** — what was attempted, target value, and
   whether it was kept (`pending` → `applied` → `acked`/`reverted`/`expired`).
@@ -103,14 +101,14 @@ exposing that separately - see "API authentication" below).
 No package installs needed — the script only uses tools already on the
 firmware (`wget`, `jsonfilter`, `ubus`, `uci`).
 
-1. Copy `agent/hobocams-agent.sh` to `/usr/bin/hobocams-agent.sh` on the
+1. Copy `agent/wifi-agent.sh` to `/usr/bin/wifi-agent.sh` on the
    device, `chmod +x` it.
-2. Copy `agent/hobocams-agent.init` to `/etc/init.d/hobocams-agent`,
+2. Copy `agent/wifi-agent.init` to `/etc/init.d/wifi-agent`,
    `chmod +x` it.
-3. Copy `agent/hobocams-agent.conf.example` to `/etc/hobocams-agent.conf`
-   and edit `HOBOCAMS_ROLE` (`AP` or `STA`) and `HOBOCAMS_SERVER_URL` for
+3. Copy `agent/wifi-agent.conf.example` to `/etc/wifi-agent.conf`
+   and edit `AGENT_ROLE` (`AP` or `STA`) and `AGENT_SERVER_URL` for
    that specific device.
-4. `/etc/init.d/hobocams-agent enable && /etc/init.d/hobocams-agent start`
+4. `/etc/init.d/wifi-agent enable && /etc/init.d/wifi-agent start`
 
 ## API authentication
 
@@ -142,9 +140,9 @@ If your ntfy instance doesn't allow anonymous publish (e.g.
 a dedicated user scoped to write-only access on just this topic, rather
 than reusing a personal account:
 ```
-docker exec -e NTFY_PASSWORD=... <ntfy-container> ntfy user add --role=user hobocams
-docker exec <ntfy-container> ntfy access hobocams <topic> write-only
-docker exec <ntfy-container> ntfy token add -l hobocams-app hobocams
+docker exec -e NTFY_PASSWORD=... <ntfy-container> ntfy user add --role=user wifi-optimizer
+docker exec <ntfy-container> ntfy access wifi-optimizer <topic> write-only
+docker exec <ntfy-container> ntfy token add -l wifi-optimizer-app wifi-optimizer
 ```
 Use the `tk_...` token output from the last command as `NTFY_TOKEN` — it
 can be revoked independently of the account password later.
@@ -178,7 +176,7 @@ end-to-end, inject a test command by hand rather than waiting for real
 rule logic:
 
 1. Confirm telemetry is landing:
-   `docker compose exec timescaledb psql -U hobocams -c "select * from devices;"`
+   `docker compose exec timescaledb psql -U wifioptimizer -c "select * from devices;"`
    — both AP and STA should show up with a recent `last_seen` within
    ~30-60s of starting their agents.
 2. Grab the AP's device id from that query, then insert a deliberately
@@ -263,7 +261,7 @@ Confirmed live via SSH against an HT-HD01-V2 AP/STA pair running OpenWrt
   meaningful signal about link health. `verify_command_applied()` now
   also requires at least one associated peer in `iwinfo assoclist` for
   `halow_operating_freq` changes specifically (not for `wifi24_channel` -
-  Blink/Shelly clients are legitimately transient, so "zero clients right
+  downstream 2.4GHz clients are legitimately transient, so "zero clients right
   now" doesn't mean a change failed the way "zero HaLow peers" does on a
   link that's supposed to always have exactly one).
 - The real US HaLow channel-plan (`app/halow_channel_plan.py`) is sourced
@@ -321,7 +319,7 @@ Confirmed live via SSH against an HT-HD01-V2 AP/STA pair running OpenWrt
   they're more disruptive changes. **The specific thresholds (70%/10%
   utilization, 60min/24h windows) are reasonable-sounding defaults, not
   empirically validated against real traffic** - there's no meaningful
-  Blink/Shelly load on the bench to tune against yet. They're now editable
+  downstream load on the bench to tune against yet. They're now editable
   from the dashboard's Optimizer Settings section (`optimizer_state`
   table) without a rebuild, so revisit them once real usage data exists
   rather than editing `config.py` and redeploying. The channel picked for
@@ -335,7 +333,7 @@ Confirmed live via SSH against an HT-HD01-V2 AP/STA pair running OpenWrt
   also means changing a *nonzero* value on a deployment that already has
   the policy won't take effect on its own; you'd need to remove the old
   one by hand first:
-  `docker compose exec timescaledb psql -U hobocams -d hobocams -c "SELECT remove_retention_policy('telemetry'); SELECT remove_retention_policy('radio_clients');"`
+  `docker compose exec timescaledb psql -U wifioptimizer -d wifioptimizer -c "SELECT remove_retention_policy('telemetry'); SELECT remove_retention_policy('radio_clients');"`
   then update `TELEMETRY_RETENTION_DAYS` and restart the `app` service.
   Setting it *back to 0*, though, is handled automatically - the app
   removes any existing policy on startup when the value is 0, so you don't

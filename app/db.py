@@ -5,7 +5,7 @@ import asyncpg
 
 from config import DATABASE_URL, TELEMETRY_RETENTION_DAYS
 
-logger = logging.getLogger("hobocams.db")
+logger = logging.getLogger("wifi_optimizer.db")
 
 _pool: asyncpg.Pool | None = None
 

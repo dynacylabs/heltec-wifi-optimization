@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>HoboCams Status</title>
+<title>Heltec WiFi Optimizer Status</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -158,7 +158,7 @@
 <body>
 
 <div id="app">
-  <h1>HoboCams Status</h1>
+  <h1>Heltec WiFi Optimizer Status</h1>
 
   <div class="kill-switch">
     <span class="status-text" id="optimizer-status-text">Optimizer: ...</span>
@@ -199,14 +199,14 @@
     </div>
   </div>
 
-  <h2>2.4GHz Link History (STA &rarr; Blink/Shelly)</h2>
+  <h2>2.4GHz Link History (STA &rarr; downstream clients)</h2>
   <div class="charts">
     <div class="chart-box">
-      <div class="chart-help">Which channel the STA's 2.4GHz radio is broadcasting on for Blink/Shelly to join. Step chart, same reasoning as HaLow bandwidth above - flat means unchanged.</div>
+      <div class="chart-help">Which channel the STA's 2.4GHz radio is broadcasting on for downstream clients to join. Step chart, same reasoning as HaLow bandwidth above - flat means unchanged.</div>
       <canvas id="chart-wifi24-channel"></canvas>
     </div>
     <div class="chart-box">
-      <div class="chart-help">Per-client signal strength as seen by the STA, one line per connected device (Blink Sync Module, Shelly relay, etc). A client with no line for a period was disconnected during that window.</div>
+      <div class="chart-help">Per-client signal strength as seen by the STA, one line per connected device on the downstream 2.4GHz network. A client with no line for a period was disconnected during that window.</div>
       <canvas id="chart-wifi24-rssi"></canvas>
     </div>
     <div class="chart-box">
