@@ -118,13 +118,30 @@
   .settings-field input[type="number"]:focus {
     outline: none; border-color: var(--accent);
   }
+  .settings-field input[type="text"], .settings-field input[type="password"], .settings-field select {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 4px; padding: 5px 8px; font-size: 13px; font-family: inherit;
+  }
+  .settings-field input[type="text"]:focus, .settings-field input[type="password"]:focus,
+  .settings-field select:focus { outline: none; border-color: var(--accent); }
   .settings-actions { display: flex; align-items: center; gap: 12px; margin-top: 18px; }
   .settings-actions button {
     padding: 8px 16px; border-radius: 6px; border: none; font-weight: 600; font-size: 13px;
     cursor: pointer; background: var(--accent); color: #0d1117;
   }
+  .settings-actions button.secondary { background: var(--border); color: var(--text); }
   .settings-status { font-size: 12px; color: var(--muted); }
+  .provision-panel {
+    display: none; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border);
+  }
+  .provision-panel.open { display: block; }
+  .provision-note { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
   .table-scroll { overflow-x: auto; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 1px solid var(--border); }
+  .tab { color: var(--muted); text-decoration: none; padding: 10px 16px; font-size: 14px; border-bottom: 2px solid transparent; background: none; cursor: pointer; font-family: inherit; }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab:hover { color: var(--text); }
+  .view.hidden { display: none; }
   @media (max-width: 480px) {
     body { padding: 14px; }
   }
@@ -159,6 +176,14 @@
 
 <div id="app">
   <h1>Heltec WiFi Optimizer Status</h1>
+
+  <div class="tabs">
+    <a href="/dashboard" class="tab" data-tab="dashboard">Dashboard</a>
+    <a href="/settings" class="tab" data-tab="settings">Settings</a>
+  </div>
+
+  <!-- ==================== Dashboard view ==================== -->
+  <div id="view-dashboard" class="view">
 
   <div class="kill-switch">
     <span class="status-text" id="optimizer-status-text">Optimizer: ...</span>
@@ -218,6 +243,18 @@
   <h2>Command History</h2>
   <div class="table-scroll" id="command-history"></div>
 
+  </div>
+  <!-- ==================== Settings view ==================== -->
+  <div id="view-settings" class="view hidden">
+
+  <h2>Device Setup</h2>
+  <div class="chart-help">SSH connection details for each device, and one-click zero-touch provisioning for brand-new hardware: installs the server's SSH key, deploys the agent script and its boot-time registration, optionally restores a prior config backup, then reboots. The password below is used only for that one bootstrap connection - it is never stored, logged, or written to disk.</div>
+  <div class="settings-grid" id="device-targets"></div>
+
+  <h2>Config Backups</h2>
+  <div class="chart-help">Automatic, versioned snapshots of each device's UCI config, pushed by the agent on its own schedule (default every 6h) and deduped server-side - a new row only ever appears here when the config actually changed. Click Restore to push a version back onto its device now, or Download to restore it manually (see README).</div>
+  <div class="table-scroll" id="backup-history"></div>
+
   <h2>Optimizer Settings</h2>
   <div id="settings-box">
     <div class="settings-grid">
@@ -267,6 +304,82 @@
       <span class="settings-status" id="settings-status"></span>
     </div>
   </div>
+
+  <h2>System Settings</h2>
+  <div class="chart-help">Everything that used to require a docker-compose.yml env var + container restart - poll intervals, alert/retention thresholds, ntfy push alerts. Changes here take effect immediately, no restart needed.</div>
+  <div id="app-settings-box">
+    <div class="settings-grid">
+      <div class="settings-card">
+        <div class="settings-card-title">Polling Intervals</div>
+        <div class="settings-field">
+          <label for="as-ssh-poll">Telemetry poll every</label>
+          <span class="settings-input"><input type="number" id="as-ssh-poll" min="1" step="1">sec</span>
+        </div>
+        <div class="settings-field">
+          <label for="as-command-poll">Command apply/verify every</label>
+          <span class="settings-input"><input type="number" id="as-command-poll" min="1" step="1">sec</span>
+        </div>
+        <div class="settings-field">
+          <label for="as-command-verify">Verify a command after</label>
+          <span class="settings-input"><input type="number" id="as-command-verify" min="1" step="1">sec</span>
+        </div>
+        <div class="settings-field">
+          <label for="as-backup-poll">Config backups every</label>
+          <span class="settings-input"><input type="number" id="as-backup-poll" min="1" step="1">sec</span>
+        </div>
+        <div class="settings-field">
+          <label for="as-optimizer-interval">Optimizer pass every</label>
+          <span class="settings-input"><input type="number" id="as-optimizer-interval" min="1" step="1">sec</span>
+        </div>
+        <div class="settings-field">
+          <label for="as-liveness-interval">Liveness check every</label>
+          <span class="settings-input"><input type="number" id="as-liveness-interval" min="1" step="1">sec</span>
+        </div>
+      </div>
+      <div class="settings-card">
+        <div class="settings-card-title">Alerting &amp; Retention</div>
+        <div class="settings-field">
+          <label for="as-offline-alert">Alert offline after</label>
+          <span class="settings-input"><input type="number" id="as-offline-alert" min="1" step="1">sec</span>
+        </div>
+        <div class="settings-field">
+          <label for="as-telemetry-retention">Keep telemetry for</label>
+          <span class="settings-input"><input type="number" id="as-telemetry-retention" min="0" step="1">days (0 = forever)</span>
+        </div>
+        <div class="settings-field">
+          <label for="as-backup-retention">Keep backup versions</label>
+          <span class="settings-input"><input type="number" id="as-backup-retention" min="0" step="1">(0 = forever)</span>
+        </div>
+      </div>
+      <div class="settings-card">
+        <div class="settings-card-title">Push Notifications (ntfy)</div>
+        <div class="settings-field">
+          <label for="as-ntfy-url">Server URL</label>
+          <span class="settings-input"><input type="text" id="as-ntfy-url" placeholder="https://ntfy.sh"></span>
+        </div>
+        <div class="settings-field">
+          <label for="as-ntfy-topic">Topic</label>
+          <span class="settings-input"><input type="text" id="as-ntfy-topic" placeholder="wifi-optimizer-alerts"></span>
+        </div>
+        <div class="settings-field">
+          <label for="as-ntfy-token">Access token</label>
+          <span class="settings-input"><input type="password" id="as-ntfy-token" placeholder="leave blank to keep unchanged" autocomplete="new-password"></span>
+        </div>
+        <div class="settings-field">
+          <label></label>
+          <span class="settings-input" id="as-ntfy-token-note"></span>
+        </div>
+        <div class="chart-help" style="margin-top: 4px;">"Send Test Notification" below uses whatever's currently saved - save any URL/topic/token changes first.</div>
+      </div>
+    </div>
+    <div class="settings-actions">
+      <button onclick="saveAppSettings()">Save System Settings</button>
+      <button class="secondary" id="test-ntfy-btn" onclick="sendTestNotification()">Send Test Notification</button>
+      <span class="settings-status" id="app-settings-status"></span>
+    </div>
+  </div>
+
+  </div>
 </div>
 
 <script>
@@ -283,6 +396,32 @@ function api(path, options = {}) {
   const sep = path.includes("?") ? "&" : "?";
   return fetch(`${path}${sep}token=${encodeURIComponent(TOKEN)}`, options);
 }
+
+// ==================== Tab switching (no full page reload) ====================
+// Both /dashboard and /settings are served by the same page - clicking a
+// tab just toggles which view is visible and updates the URL via
+// history.pushState, rather than triggering a real navigation.
+
+function showTab(tab, { pushState = true } = {}) {
+  document.getElementById("view-dashboard").classList.toggle("hidden", tab !== "dashboard");
+  document.getElementById("view-settings").classList.toggle("hidden", tab !== "settings");
+  document.querySelectorAll(".tab").forEach(a => a.classList.toggle("active", a.dataset.tab === tab));
+  if (pushState) {
+    history.pushState({ tab }, "", tab === "settings" ? "/settings" : "/dashboard");
+  }
+}
+
+document.querySelectorAll(".tab").forEach(a => {
+  a.addEventListener("click", (e) => {
+    e.preventDefault();
+    showTab(a.dataset.tab);
+  });
+});
+
+window.addEventListener("popstate", (e) => {
+  const tab = e.state?.tab || (location.pathname.includes("settings") ? "settings" : "dashboard");
+  showTab(tab, { pushState: false });
+});
 
 async function refreshOptimizerState() {
   const resp = await api("/api/optimizer");
@@ -350,13 +489,80 @@ async function saveSettings() {
   setTimeout(() => { statusEl.textContent = ""; }, 4000);
 }
 
+async function loadAppSettings() {
+  const resp = await api("/api/app-settings");
+  if (!resp.ok) return;
+  const s = await resp.json();
+  document.getElementById("as-ssh-poll").value = s.ssh_poll_interval_seconds;
+  document.getElementById("as-command-poll").value = s.command_poll_interval_seconds;
+  document.getElementById("as-command-verify").value = s.command_verify_delay_seconds;
+  document.getElementById("as-backup-poll").value = s.backup_poll_interval_seconds;
+  document.getElementById("as-optimizer-interval").value = s.optimizer_interval_seconds;
+  document.getElementById("as-liveness-interval").value = s.liveness_check_interval_seconds;
+  document.getElementById("as-offline-alert").value = s.offline_alert_seconds;
+  document.getElementById("as-telemetry-retention").value = s.telemetry_retention_days;
+  document.getElementById("as-backup-retention").value = s.backup_retention_count;
+  document.getElementById("as-ntfy-url").value = s.ntfy_url;
+  document.getElementById("as-ntfy-topic").value = s.ntfy_topic;
+  // The token itself is never sent back by the server - only whether one
+  // is currently stored. Leaving the field blank on save keeps it as-is.
+  document.getElementById("as-ntfy-token").value = "";
+  document.getElementById("as-ntfy-token-note").textContent = s.ntfy_token_set
+    ? "A token is currently set. Leave blank to keep it."
+    : "No token currently set.";
+}
+
+async function saveAppSettings() {
+  const statusEl = document.getElementById("app-settings-status");
+  const body = {
+    ssh_poll_interval_seconds: parseInt(document.getElementById("as-ssh-poll").value, 10),
+    command_poll_interval_seconds: parseInt(document.getElementById("as-command-poll").value, 10),
+    command_verify_delay_seconds: parseInt(document.getElementById("as-command-verify").value, 10),
+    backup_poll_interval_seconds: parseInt(document.getElementById("as-backup-poll").value, 10),
+    optimizer_interval_seconds: parseInt(document.getElementById("as-optimizer-interval").value, 10),
+    liveness_check_interval_seconds: parseInt(document.getElementById("as-liveness-interval").value, 10),
+    offline_alert_seconds: parseInt(document.getElementById("as-offline-alert").value, 10),
+    telemetry_retention_days: parseInt(document.getElementById("as-telemetry-retention").value, 10),
+    backup_retention_count: parseInt(document.getElementById("as-backup-retention").value, 10),
+    ntfy_url: document.getElementById("as-ntfy-url").value,
+    ntfy_topic: document.getElementById("as-ntfy-topic").value,
+  };
+  const token = document.getElementById("as-ntfy-token").value;
+  if (token) body.ntfy_token = token;
+  const resp = await api("/api/app-settings", { method: "POST", body: JSON.stringify(body) });
+  statusEl.textContent = resp.ok ? "Saved." : "Failed to save - check values.";
+  if (resp.ok) loadAppSettings();
+  setTimeout(() => { statusEl.textContent = ""; }, 4000);
+}
+
+async function sendTestNotification() {
+  const statusEl = document.getElementById("app-settings-status");
+  const btnEl = document.getElementById("test-ntfy-btn");
+  btnEl.disabled = true;
+  try {
+    const resp = await api("/api/app-settings/test-notification", { method: "POST" });
+    if (resp.ok) {
+      statusEl.textContent = "Test notification sent - check your ntfy app.";
+    } else {
+      const body = await resp.json().catch(() => ({}));
+      statusEl.textContent = body.detail || "Failed to send test notification.";
+    }
+  } finally {
+    btnEl.disabled = false;
+  }
+  setTimeout(() => { statusEl.textContent = ""; }, 6000);
+}
+
 function showApp() {
+  showTab(location.pathname.includes("settings") ? "settings" : "dashboard", { pushState: false });
   initCharts();
   refreshAll();
   refreshOptimizerState();
   loadSettings();
+  loadAppSettings();
   setInterval(refreshStatus, 15000);
   setInterval(refreshCommands, 15000);
+  setInterval(refreshBackups, 60000);
   setInterval(refreshCharts, 30000);
   setInterval(refreshOptimizerState, 15000);
 }
@@ -605,10 +811,164 @@ async function refreshCommands() {
   `;
 }
 
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function refreshBackups() {
+  const resp = await api("/api/backups?limit=100");
+  if (!resp.ok) return;
+  const backups = await resp.json();
+  const container = document.getElementById("backup-history");
+  if (backups.length === 0) {
+    container.innerHTML = '<div class="empty">No config backups yet - the agent uploads its first snapshot shortly after starting.</div>';
+    return;
+  }
+  const rows = backups.map(b => `
+    <tr>
+      <td data-label="Time">${new Date(b.created_at).toLocaleString()}</td>
+      <td data-label="Device">${b.device_role}</td>
+      <td data-label="Size">${formatBytes(b.size_bytes)}</td>
+      <td data-label="SHA-256"><code title="${b.sha256}">${b.sha256.slice(0, 12)}&hellip;</code></td>
+      <td data-label="Actions">
+        <a href="/api/backups/${b.id}/download?token=${encodeURIComponent(TOKEN)}">Download</a>
+        &nbsp;|&nbsp;
+        <a href="#" onclick="restoreBackup(${b.id}, ${JSON.stringify(b.device_role)}); return false;">Restore</a>
+      </td>
+    </tr>
+  `).join("");
+  container.innerHTML = `
+    <table>
+      <thead><tr><th>Time</th><th>Device</th><th>Size</th><th>SHA-256</th><th>Actions</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+async function restoreBackup(backupId, roleLabel) {
+  if (!confirm(`Restore this ${roleLabel} backup onto the device now? Its network services will restart.`)) return;
+  const resp = await api(`/api/backups/${backupId}/restore`, { method: "POST" });
+  alert(resp.ok ? "Restore complete." : `Restore failed: ${await resp.text()}`);
+}
+
+function deviceTargetCard(t) {
+  const statusLine = t.provisioned_at
+    ? `Provisioned ${timeAgo(t.provisioned_at)} - last status: ${t.last_provision_status || "unknown"}`
+    : "Not yet provisioned via the dashboard.";
+  const errorLine = t.last_provision_error ? `<div class="settings-status" style="color: var(--red);">${t.last_provision_error}</div>` : "";
+  return `
+    <div class="settings-card" id="device-target-${t.role}">
+      <div class="settings-card-title">${t.role} &mdash; ${t.label || t.role}</div>
+      <div class="settings-field">
+        <label for="dt-${t.role}-label">Label</label>
+        <span class="settings-input"><input type="text" id="dt-${t.role}-label" value="${t.label || ""}"></span>
+      </div>
+      <div class="settings-field">
+        <label for="dt-${t.role}-host">SSH host</label>
+        <span class="settings-input"><input type="text" id="dt-${t.role}-host" value="${t.ssh_host}"></span>
+      </div>
+      <div class="settings-field">
+        <label for="dt-${t.role}-port">SSH port</label>
+        <span class="settings-input"><input type="number" id="dt-${t.role}-port" min="1" max="65535" value="${t.ssh_port}"></span>
+      </div>
+      <div class="settings-field">
+        <label for="dt-${t.role}-user">SSH user</label>
+        <span class="settings-input"><input type="text" id="dt-${t.role}-user" value="${t.ssh_user}"></span>
+      </div>
+      <div class="settings-actions">
+        <button onclick="saveDeviceTarget('${t.role}')">Save</button>
+        <button class="secondary" onclick="toggleProvisionPanel('${t.role}')">Provision Device&hellip;</button>
+        <span class="settings-status" id="dt-${t.role}-status"></span>
+      </div>
+      <div class="provision-note">${statusLine}</div>
+      ${errorLine}
+      <div class="provision-panel" id="dt-${t.role}-panel">
+        <div class="provision-note">Installs the server's SSH key on this device (one-time password login), deploys the agent script, optionally restores a backup below, then reboots. Only use this against a factory/reset device already reachable at the host/port/user above.</div>
+        <div class="settings-field">
+          <label for="dt-${t.role}-password">Device root password</label>
+          <span class="settings-input"><input type="password" id="dt-${t.role}-password" autocomplete="off"></span>
+        </div>
+        <div class="settings-field">
+          <label for="dt-${t.role}-restore">Restore backup (optional)</label>
+          <span class="settings-input">
+            <select id="dt-${t.role}-restore"><option value="">None</option></select>
+          </span>
+        </div>
+        <div class="settings-actions">
+          <button onclick="provisionDevice('${t.role}')">Provision</button>
+          <span class="settings-status" id="dt-${t.role}-provision-status"></span>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function refreshDeviceTargets() {
+  const resp = await api("/api/device-targets");
+  if (!resp.ok) return;
+  const targets = await resp.json();
+  document.getElementById("device-targets").innerHTML = targets.map(deviceTargetCard).join("");
+}
+
+async function saveDeviceTarget(role) {
+  const statusEl = document.getElementById(`dt-${role}-status`);
+  const body = {
+    label: document.getElementById(`dt-${role}-label`).value,
+    ssh_host: document.getElementById(`dt-${role}-host`).value,
+    ssh_port: parseInt(document.getElementById(`dt-${role}-port`).value, 10),
+    ssh_user: document.getElementById(`dt-${role}-user`).value,
+  };
+  const resp = await api(`/api/device-targets/${role}`, { method: "POST", body: JSON.stringify(body) });
+  statusEl.textContent = resp.ok ? "Saved." : "Failed to save - check values.";
+  setTimeout(() => { statusEl.textContent = ""; }, 4000);
+}
+
+async function toggleProvisionPanel(role) {
+  const panel = document.getElementById(`dt-${role}-panel`);
+  const opening = !panel.classList.contains("open");
+  panel.classList.toggle("open");
+  if (opening) {
+    const select = document.getElementById(`dt-${role}-restore`);
+    const resp = await api("/api/backups?limit=100");
+    if (resp.ok) {
+      const backups = (await resp.json()).filter(b => b.device_role === role);
+      select.innerHTML = '<option value="">None</option>' + backups.map(b =>
+        `<option value="${b.id}">${new Date(b.created_at).toLocaleString()} (${formatBytes(b.size_bytes)})</option>`
+      ).join("");
+    }
+  }
+}
+
+async function provisionDevice(role) {
+  const statusEl = document.getElementById(`dt-${role}-provision-status`);
+  const password = document.getElementById(`dt-${role}-password`).value;
+  const restoreId = document.getElementById(`dt-${role}-restore`).value;
+  if (!password) {
+    statusEl.textContent = "Password required.";
+    return;
+  }
+  if (!confirm(`Provision the ${role} device now? This installs our SSH key, deploys the agent, and reboots it.`)) return;
+  const body = { password };
+  if (restoreId) body.restore_backup_id = parseInt(restoreId, 10);
+  statusEl.textContent = "Provisioning\u2026";
+  const resp = await api(`/api/device-targets/${role}/provision`, { method: "POST", body: JSON.stringify(body) });
+  document.getElementById(`dt-${role}-password`).value = "";
+  if (resp.ok) {
+    statusEl.textContent = "Provisioned successfully.";
+    refreshDeviceTargets();
+  } else {
+    statusEl.textContent = `Failed: ${await resp.text()}`;
+  }
+}
+
 function refreshAll() {
   refreshStatus();
   refreshCharts();
   refreshCommands();
+  refreshBackups();
+  refreshDeviceTargets();
 }
 
 showApp();

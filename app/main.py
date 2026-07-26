@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -8,27 +9,27 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, ValidationError
 
-from config import (
-    API_TOKEN,
-    DEFAULT_COMMAND_TTL_SECONDS,
-    LIVENESS_CHECK_INTERVAL_SECONDS,
-    OFFLINE_ALERT_SECONDS,
-    OPTIMIZER_INTERVAL_SECONDS,
-)
+import device_client
+import ssh_client
+from config import API_TOKEN, DEFAULT_COMMAND_TTL_SECONDS, SSH_KEY_PATH
 from db import close_pool, ensure_retention_policies, get_pool
 from models import (
+    AppSettings,
+    AppSettingsUpdate,
+    BackupHistoryEntry,
+    CollectResult,
     CommandHistoryEntry,
-    CommandOut,
-    CommandReport,
     DeviceStatus,
+    DeviceTarget,
+    DeviceTargetUpdate,
     OptimizerSettings,
     OptimizerState,
+    ProvisionRequest,
     RadioClientPoint,
     RadioSnapshot,
     TelemetryPoint,
-    TelemetryReport,
 )
-from notify import notify
+from notify import notify, send_test_notification
 from optimizer import run_optimizer_pass
 
 logging.basicConfig(level=logging.INFO)
@@ -37,15 +38,59 @@ logger = logging.getLogger("wifi_optimizer")
 scheduler = AsyncIOScheduler()
 
 
+async def _get_app_settings(pool) -> dict:
+    # Loaded fresh from the DB (app_settings table, migration 011) rather
+    # than cached in a module-level config constant - poll intervals,
+    # alert/retention thresholds, ntfy config. Reloading it wherever it's
+    # needed means an edit from the dashboard's System Settings section
+    # takes effect immediately, same reasoning as _get_device_targets and
+    # optimizer_state.
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM app_settings LIMIT 1")
+    return dict(row)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     pool = await get_pool()
-    await ensure_retention_policies(pool)
-    scheduler.add_job(run_optimizer_pass, "interval", seconds=OPTIMIZER_INTERVAL_SECONDS, args=[pool])
-    scheduler.add_job(check_device_liveness, "interval", seconds=LIVENESS_CHECK_INTERVAL_SECONDS, args=[pool])
+    settings = await _get_app_settings(pool)
+    await ensure_retention_policies(pool, settings["telemetry_retention_days"])
+    # Every job below is given an explicit id so update_app_settings can
+    # reschedule it live (scheduler.reschedule_job) when its interval
+    # changes from the dashboard, without needing a container restart.
+    scheduler.add_job(
+        run_optimizer_pass, "interval", seconds=settings["optimizer_interval_seconds"],
+        args=[pool], id="run_optimizer_pass",
+    )
+    scheduler.add_job(
+        check_device_liveness, "interval", seconds=settings["liveness_check_interval_seconds"],
+        args=[pool], id="check_device_liveness",
+    )
+    # Everything below reaches out to the devices over SSH rather than
+    # waiting for them to call in - which host/port/user to dial for each
+    # role is loaded from the device_targets DB table on every tick (see
+    # _get_device_targets), not fixed at startup - and README's
+    # "Reaching the devices over SSH".
+    scheduler.add_job(
+        poll_telemetry, "interval", seconds=settings["ssh_poll_interval_seconds"],
+        args=[pool], id="poll_telemetry",
+    )
+    scheduler.add_job(
+        apply_pending_commands, "interval", seconds=settings["command_poll_interval_seconds"],
+        args=[pool], id="apply_pending_commands",
+    )
+    scheduler.add_job(
+        check_in_flight_commands, "interval", seconds=settings["command_poll_interval_seconds"],
+        args=[pool], id="check_in_flight_commands",
+    )
+    scheduler.add_job(
+        poll_backups, "interval", seconds=settings["backup_poll_interval_seconds"],
+        args=[pool], id="poll_backups",
+    )
     scheduler.start()
     yield
     scheduler.shutdown()
+    await ssh_client.close_all()
     await close_pool()
 
 
@@ -59,10 +104,13 @@ async def require_token(token: str):
 
 
 async def parse_body(request: Request, model: type[BaseModel]):
-    # See post_telemetry's comment for why this bypasses FastAPI's automatic
-    # content-type-sensitive body parsing. Raises the same 422 shape FastAPI
-    # would have produced automatically, so callers get a normal error body
-    # instead of an unhandled 500 on malformed input.
+    # The dashboard's fetch() calls (set_optimizer_state, set_optimizer_settings)
+    # don't set an explicit Content-Type on their JSON string bodies, so the
+    # browser defaults to text/plain - which FastAPI's automatic
+    # content-type-sensitive body parsing rejects for a JSON model. Parsing
+    # the raw bytes ourselves sidesteps that. Raises the same 422 shape
+    # FastAPI would have produced automatically, so callers get a normal
+    # error body instead of an unhandled 500 on malformed input.
     try:
         return model.model_validate_json(await request.body())
     except ValidationError as e:
@@ -83,6 +131,7 @@ async def _get_or_create_device(pool, mac: str, role: str | None, hostname: str 
                 # and let whoever got paged know it's over.
                 await conn.execute("UPDATE devices SET offline_alerted = false WHERE id = $1", row["id"])
                 await notify(
+                    conn,
                     f"WiFi Optimizer: {row['role']} {hostname or mac} back online",
                     "Telemetry resumed after an outage.",
                     tags="white_check_mark",
@@ -101,6 +150,8 @@ async def check_device_liveness(pool):
     # Runs independently of the optimizer pass - a device being offline has
     # nothing to do with rule evaluation, and we want this checked on its
     # own (usually much shorter) interval.
+    settings = await _get_app_settings(pool)
+    offline_alert_seconds = settings["offline_alert_seconds"]
     async with pool.acquire() as conn:
         stale = await conn.fetch(
             """
@@ -108,118 +159,307 @@ async def check_device_liveness(pool):
             WHERE offline_alerted = false
               AND (last_seen IS NULL OR last_seen < now() - make_interval(secs => $1))
             """,
-            OFFLINE_ALERT_SECONDS,
+            offline_alert_seconds,
         )
         for d in stale:
             await conn.execute("UPDATE devices SET offline_alerted = true WHERE id = $1", d["id"])
             await notify(
+                conn,
                 f"WiFi Optimizer: {d['role']} {d['hostname'] or d['mac']} offline",
-                f"No telemetry received in over {OFFLINE_ALERT_SECONDS}s.",
+                f"No telemetry received in over {offline_alert_seconds}s.",
                 priority="high",
                 tags="warning",
             )
 
 
-@app.post("/telemetry", status_code=204, dependencies=[Depends(require_token)])
-async def post_telemetry(request: Request):
-    # Parse the body ourselves rather than declaring `report: TelemetryReport`
-    # directly - the OpenWrt agent's wget (uclient-fetch) always sends
-    # Content-Type: application/x-www-form-urlencoded for --post-data (no way
-    # to override it, no --header support), which FastAPI's automatic
-    # pydantic-body parsing rejects. model_validate_json parses the raw bytes
-    # unconditionally, regardless of Content-Type.
-    report = await parse_body(request, TelemetryReport)
-    pool = await get_pool()
-    device_id = await _get_or_create_device(pool, report.device_mac, report.role, report.hostname)
+async def _notify_reverted(conn, command_id: int, reason: str | None):
+    info = await conn.fetchrow(
+        """
+        SELECT d.mac, d.role, c.param, c.target_value FROM commands c
+        JOIN devices d ON d.id = c.device_id WHERE c.id = $1
+        """,
+        command_id,
+    )
+    if info:
+        await notify(
+            conn,
+            f"WiFi Optimizer: {info['role']} command reverted",
+            f"{info['param']} -> {info['target_value']} was reverted: {reason or 'no reason given'}",
+            priority="high",
+            tags="rotating_light",
+        )
+
+
+async def _upsert_radio_counters(conn, device_id, radio: str, retries_cum, packets_cum, tx_bytes_cum, rx_bytes_cum, now):
+    # Returns the computed (retries_rate, throughput_mbps) for this poll by
+    # comparing against whatever was stored on the *previous* poll, then
+    # overwrites the stored row with this poll's raw counters. Cumulative
+    # counters resetting (reboot, counter wrap) or this being the first
+    # poll ever are treated as "no rate yet" (None) rather than a nonsense
+    # negative/huge value - same reasoning the old on-device delta_rate/
+    # delta_throughput_mbps had, just relocated here now that there's no
+    # persistent on-device process to keep that state between one-shot SSH
+    # polls (see migration 009).
+    prev = await conn.fetchrow(
+        "SELECT retries_cum, packets_cum, tx_bytes_cum, rx_bytes_cum, updated_at FROM device_radio_counters WHERE device_id = $1 AND radio = $2",
+        device_id, radio,
+    )
+    await conn.execute(
+        """
+        INSERT INTO device_radio_counters (device_id, radio, retries_cum, packets_cum, tx_bytes_cum, rx_bytes_cum, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (device_id, radio) DO UPDATE SET
+            retries_cum = $3, packets_cum = $4, tx_bytes_cum = $5, rx_bytes_cum = $6, updated_at = $7
+        """,
+        device_id, radio, retries_cum, packets_cum, tx_bytes_cum, rx_bytes_cum, now,
+    )
+    retries_rate = None
+    if prev and retries_cum is not None and packets_cum is not None and prev["packets_cum"] is not None:
+        d_retries = retries_cum - prev["retries_cum"]
+        d_packets = packets_cum - prev["packets_cum"]
+        retries_rate = (d_retries / d_packets) if (d_retries >= 0 and d_packets > 0) else 0.0
+    throughput_mbps = None
+    if prev and tx_bytes_cum is not None and rx_bytes_cum is not None and prev["tx_bytes_cum"] is not None:
+        d_bytes = (tx_bytes_cum + rx_bytes_cum) - (prev["tx_bytes_cum"] + prev["rx_bytes_cum"])
+        d_secs = (now - prev["updated_at"]).total_seconds()
+        throughput_mbps = ((d_bytes * 8) / (d_secs * 1_000_000)) if (d_bytes >= 0 and d_secs > 0) else 0.0
+    return retries_rate, throughput_mbps
+
+
+async def _upsert_client_counters(conn, device_id, radio: str, client_mac: str, retries_cum, packets_cum, now):
+    prev = await conn.fetchrow(
+        "SELECT retries_cum, packets_cum FROM device_radio_client_counters WHERE device_id = $1 AND radio = $2 AND client_mac = $3",
+        device_id, radio, client_mac,
+    )
+    await conn.execute(
+        """
+        INSERT INTO device_radio_client_counters (device_id, radio, client_mac, retries_cum, packets_cum, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (device_id, radio, client_mac) DO UPDATE SET
+            retries_cum = $4, packets_cum = $5, updated_at = $6
+        """,
+        device_id, radio, client_mac, retries_cum, packets_cum, now,
+    )
+    if not prev or retries_cum is None or packets_cum is None or prev["packets_cum"] is None:
+        return None
+    d_retries = retries_cum - prev["retries_cum"]
+    d_packets = packets_cum - prev["packets_cum"]
+    return (d_retries / d_packets) if (d_retries >= 0 and d_packets > 0) else 0.0
+
+
+async def _ingest_collect(pool, role: str, raw: dict):
+    result = CollectResult.model_validate(raw)
+    device_id = await _get_or_create_device(pool, result.device_mac, role, result.hostname)
     now = datetime.now(timezone.utc)
     async with pool.acquire() as conn:
         async with conn.transaction():
-            for radio in report.radios:
+            for radio in result.radios:
+                retries_rate, throughput_mbps = await _upsert_radio_counters(
+                    conn, device_id, radio.radio, radio.retries_cum, radio.packets_cum,
+                    radio.tx_bytes_cum, radio.rx_bytes_cum, now,
+                )
                 await conn.execute(
                     """
                     INSERT INTO telemetry (time, device_id, radio, rssi, noise, mcs, rate_mbps, retries, channel, bandwidth_mhz, throughput_mbps)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     """,
                     now, device_id, radio.radio, radio.rssi, radio.noise, radio.mcs,
-                    radio.rate_mbps, radio.retries, radio.channel, radio.bandwidth_mhz, radio.throughput_mbps,
+                    radio.rate_mbps, retries_rate, radio.channel, radio.bandwidth_mhz, throughput_mbps,
                 )
                 for client in radio.clients:
+                    client_retries = await _upsert_client_counters(
+                        conn, device_id, radio.radio, client.mac, client.retries_cum, client.packets_cum, now,
+                    )
                     await conn.execute(
                         """
                         INSERT INTO radio_clients (time, device_id, radio, client_mac, host, rssi, rate_mbps, retries)
                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                         """,
-                        now, device_id, radio.radio, client.mac, client.host, client.rssi, client.rate_mbps, client.retries,
+                        now, device_id, radio.radio, client.mac, None, client.rssi, client.rate_mbps, client_retries,
                     )
 
 
-@app.get("/commands/{device_mac}", dependencies=[Depends(require_token)])
-async def get_next_command(device_mac: str):
-    pool = await get_pool()
+async def _get_device_targets(pool) -> dict[str, tuple[str, int, str]]:
+    # Loaded fresh from the DB every scheduler tick rather than cached -
+    # this table is tiny and rarely written to, and reloading it means an
+    # edit made from the dashboard's Device Setup section takes effect on
+    # the very next poll, with no restart required.
     async with pool.acquire() as conn:
-        device = await conn.fetchrow("SELECT id FROM devices WHERE mac = $1", device_mac)
-        if not device:
-            raise HTTPException(404, "unknown device")
-        cmd = await conn.fetchrow(
+        rows = await conn.fetch("SELECT role, ssh_host, ssh_port, ssh_user FROM device_targets")
+    return {r["role"]: (r["ssh_host"], r["ssh_port"], r["ssh_user"]) for r in rows}
+
+
+async def poll_telemetry(pool):
+    # Server-initiated telemetry pull, one SSH round-trip per device per
+    # tick (see device_client.collect) - replaces the old design where each
+    # device's agent pushed this out on its own loop.
+    for role, (host, port, user) in (await _get_device_targets(pool)).items():
+        try:
+            raw = await device_client.collect(host, port, user, SSH_KEY_PATH)
+        except Exception:
+            logger.warning("telemetry collect failed for %s (%s)", role, host, exc_info=True)
+            continue
+        try:
+            await _ingest_collect(pool, role, raw)
+        except Exception:
+            logger.exception("failed to ingest telemetry for %s (%s)", role, host)
+
+
+async def apply_pending_commands(pool):
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
             """
-            SELECT id, param, target_value, ttl_seconds FROM commands
-            WHERE device_id = $1 AND status = 'pending'
-            ORDER BY created_at ASC LIMIT 1
-            """,
-            device["id"],
+            SELECT c.id, c.param, c.target_value, d.mac, d.role
+            FROM commands c JOIN devices d ON d.id = c.device_id
+            WHERE c.status = 'pending'
+            ORDER BY c.created_at ASC
+            """
         )
-        if not cmd:
-            return Response(status_code=204)
-        await conn.execute(
-            "UPDATE commands SET status = 'applied', applied_at = now() WHERE id = $1",
-            cmd["id"],
-        )
-        return CommandOut(
-            command_id=cmd["id"],
-            param=cmd["param"],
-            target_value=cmd["target_value"],
-            ttl_seconds=cmd["ttl_seconds"],
-        )
-
-
-@app.post("/commands/{command_id}/report", status_code=204, dependencies=[Depends(require_token)])
-async def report_command(command_id: int, request: Request):
-    # See post_telemetry for why this parses the body manually.
-    report = await parse_body(request, CommandReport)
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        cmd = await conn.fetchrow("SELECT id FROM commands WHERE id = $1", command_id)
-        if not cmd:
-            raise HTTPException(404, "unknown command")
-        if report.status == "acked":
-            await conn.execute(
-                "UPDATE commands SET status = $2, acked_at = now(), reason = $3 WHERE id = $1",
-                command_id, report.status, report.reason,
-            )
-        else:
-            await conn.execute(
-                "UPDATE commands SET status = $2, reason = $3 WHERE id = $1",
-                command_id, report.status, report.reason,
-            )
-            if report.status == "reverted":
-                info = await conn.fetchrow(
-                    """
-                    SELECT d.mac, d.role, c.param, c.target_value FROM commands c
-                    JOIN devices d ON d.id = c.device_id WHERE c.id = $1
-                    """,
-                    command_id,
+    if not rows:
+        return
+    targets = await _get_device_targets(pool)
+    for c in rows:
+        target = targets.get(c["role"])
+        if target is None:
+            logger.warning("no device_targets row for role %s, skipping command %s", c["role"], c["id"])
+            continue
+        host, port, user = target
+        if c["param"] == "reboot":
+            # No uci apply/rollback to do, and no live state to verify
+            # afterward - the device is about to disappear. Ack as soon as
+            # the reboot command has actually been sent over SSH, same
+            # "ack first" ordering the old agent used, just server-driven.
+            try:
+                await device_client.reboot(host, port, user, SSH_KEY_PATH)
+            except Exception:
+                logger.warning("reboot SSH failed for %s (%s), will retry next tick", c["mac"], host, exc_info=True)
+                continue
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE commands SET status = 'acked', applied_at = now(), acked_at = now() WHERE id = $1",
+                    c["id"],
                 )
-                if info:
-                    await notify(
-                        f"WiFi Optimizer: {info['role']} command reverted",
-                        f"{info['param']} -> {info['target_value']} was reverted: {report.reason or 'no reason given'}",
-                        priority="high",
-                        tags="rotating_light",
+            logger.warning("Reboot acked for %s (%s)", c["mac"], host)
+            continue
+
+        try:
+            await device_client.apply_command(
+                host, port, user, SSH_KEY_PATH, c["param"], c["target_value"],
+                DEFAULT_COMMAND_TTL_SECONDS.get(c["param"], 120),
+            )
+        except Exception:
+            logger.warning(
+                "apply SSH failed for command %s on %s (%s), will retry next tick",
+                c["id"], c["mac"], host, exc_info=True,
+            )
+            continue
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE commands SET status = 'applied', applied_at = now() WHERE id = $1", c["id"],
+            )
+
+
+async def check_in_flight_commands(pool):
+    # Runs the same cadence as apply_pending_commands. A command sits here
+    # (status='applied') until either verify-confirm gives a definitive
+    # answer or its ttl_seconds + grace period lapses - the on-device
+    # `uci apply --rollback` timer is what actually guarantees the link
+    # can't be left in a bad state either way; this loop only decides what
+    # the dashboard/history should say happened.
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT c.id, c.param, c.target_value, c.ttl_seconds, c.applied_at, d.mac, d.role
+            FROM commands c JOIN devices d ON d.id = c.device_id
+            WHERE c.status = 'applied'
+            """
+        )
+    now = datetime.now(timezone.utc)
+    if not rows:
+        return
+    targets = await _get_device_targets(pool)
+    command_verify_delay_seconds = (await _get_app_settings(pool))["command_verify_delay_seconds"]
+    for c in rows:
+        elapsed = (now - c["applied_at"]).total_seconds()
+        if elapsed < command_verify_delay_seconds:
+            continue
+        target = targets.get(c["role"])
+        if target is None:
+            logger.warning("no device_targets row for role %s, skipping command %s", c["role"], c["id"])
+            continue
+        host, port, user = target
+        confirmed = None
+        try:
+            confirmed = await device_client.verify_and_confirm(
+                host, port, user, SSH_KEY_PATH, c["param"], c["target_value"],
+            )
+        except Exception:
+            logger.warning(
+                "verify-confirm SSH failed for command %s on %s (%s)", c["id"], c["mac"], host, exc_info=True,
+            )
+
+        async with pool.acquire() as conn:
+            if confirmed is True:
+                await conn.execute("UPDATE commands SET status = 'acked', acked_at = now() WHERE id = $1", c["id"])
+            elif confirmed is False:
+                reason = "target value not reached after apply"
+                await conn.execute("UPDATE commands SET status = 'reverted', reason = $2 WHERE id = $1", c["id"], reason)
+                await _notify_reverted(conn, c["id"], reason)
+            elif elapsed >= c["ttl_seconds"] + 15:
+                # Couldn't reach the device to check even after retrying
+                # every tick up to ttl_seconds + 15s - the on-device
+                # rollback timer has certainly lapsed and reverted the
+                # change on its own by now regardless.
+                reason = "could not reach device to confirm within ttl_seconds"
+                await conn.execute("UPDATE commands SET status = 'reverted', reason = $2 WHERE id = $1", c["id"], reason)
+                await _notify_reverted(conn, c["id"], reason)
+            # else: still within the retry window - leave as 'applied', try again next tick.
+
+
+async def poll_backups(pool):
+    backup_retention_count = (await _get_app_settings(pool))["backup_retention_count"]
+    for role, (host, port, user) in (await _get_device_targets(pool)).items():
+        try:
+            archive = await device_client.fetch_backup(host, port, user, SSH_KEY_PATH)
+        except Exception:
+            logger.warning("backup fetch failed for %s (%s)", role, host, exc_info=True)
+            continue
+        if not archive:
+            continue
+        sha256 = hashlib.sha256(archive).hexdigest()
+        async with pool.acquire() as conn:
+            device = await conn.fetchrow("SELECT id FROM devices WHERE role = $1", role)
+            if not device:
+                continue  # hasn't shown up via telemetry yet
+            latest_sha256 = await conn.fetchval(
+                "SELECT sha256 FROM device_backups WHERE device_id = $1 ORDER BY created_at DESC LIMIT 1",
+                device["id"],
+            )
+            if latest_sha256 == sha256:
+                continue  # unchanged since the last stored version
+            await conn.execute(
+                "INSERT INTO device_backups (device_id, sha256, size_bytes, archive) VALUES ($1, $2, $3, $4)",
+                device["id"], sha256, len(archive), archive,
+            )
+            if backup_retention_count > 0:
+                await conn.execute(
+                    """
+                    DELETE FROM device_backups WHERE device_id = $1 AND id NOT IN (
+                        SELECT id FROM device_backups WHERE device_id = $1
+                        ORDER BY created_at DESC LIMIT $2
                     )
+                    """,
+                    device["id"], backup_retention_count,
+                )
 
 
-# Agent posts roughly every 30s; treat gaps beyond this as real downtime
-# rather than normal jitter between polls.
+# Devices are polled roughly every ssh_poll_interval_seconds (default 30s,
+# app_settings table); treat gaps beyond this as real downtime rather than
+# normal jitter between polls. Deliberately a fixed constant, not read
+# from the DB - a generous fixed margin over the default poll interval is
+# simpler than threading a dynamic value through every uptime query, and
+# this only affects the dashboard's uptime-% display, not anything that
+# gates a real alert.
 EXPECTED_POLL_INTERVAL_SECONDS = 60
 
 
@@ -417,12 +657,12 @@ async def set_optimizer_state(request: Request):
 
 @app.post("/api/devices/{device_mac}/reboot", status_code=202, dependencies=[Depends(require_token)])
 async def reboot_device(device_mac: str):
-    # Queued through the same commands table as everything else, but the
-    # agent special-cases 'reboot' - there's no uci apply/rollback to do,
-    # and no live-state to verify afterward (the device disappears). Meant
-    # for "the agent process is wedged but the device is still up", which
-    # otherwise has no remote recovery path on hardware sitting somewhere
-    # hard to physically reach.
+    # Queued through the same commands table as everything else, but
+    # apply_pending_commands special-cases 'reboot' - there's no uci apply/
+    # rollback to do, and no live state to verify afterward (the device
+    # disappears mid-SSH-session). Meant for "the device is up but wedged
+    # in a bad radio/network state", which otherwise has no remote
+    # recovery path on hardware sitting somewhere hard to physically reach.
     pool = await get_pool()
     async with pool.acquire() as conn:
         device = await conn.fetchrow("SELECT id, role FROM devices WHERE mac = $1", device_mac)
@@ -474,23 +714,278 @@ async def set_optimizer_settings(request: Request):
     logger.warning("Optimizer settings updated via dashboard: %s", settings)
 
 
+@app.get("/api/app-settings", response_model=AppSettings, dependencies=[Depends(require_token)])
+async def get_app_settings():
+    row = await _get_app_settings(await get_pool())
+    return AppSettings(
+        ssh_poll_interval_seconds=row["ssh_poll_interval_seconds"],
+        command_poll_interval_seconds=row["command_poll_interval_seconds"],
+        command_verify_delay_seconds=row["command_verify_delay_seconds"],
+        backup_poll_interval_seconds=row["backup_poll_interval_seconds"],
+        optimizer_interval_seconds=row["optimizer_interval_seconds"],
+        liveness_check_interval_seconds=row["liveness_check_interval_seconds"],
+        offline_alert_seconds=row["offline_alert_seconds"],
+        telemetry_retention_days=row["telemetry_retention_days"],
+        backup_retention_count=row["backup_retention_count"],
+        ntfy_url=row["ntfy_url"],
+        ntfy_topic=row["ntfy_topic"],
+        ntfy_token_set=bool(row["ntfy_token"]),
+    )
+
+
+@app.post("/api/app-settings", status_code=204, dependencies=[Depends(require_token)])
+async def update_app_settings(request: Request):
+    # Everything here used to be a docker-compose.yml env var - see
+    # config.py and README's "Configuring app settings". Rescheduling the
+    # live APScheduler jobs (by the fixed ids assigned in lifespan()) and
+    # re-running ensure_retention_policies means a change here takes
+    # effect immediately, no container restart required.
+    update = await parse_body(request, AppSettingsUpdate)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if update.ntfy_token:
+            await conn.execute(
+                """
+                UPDATE app_settings SET
+                    ssh_poll_interval_seconds = $1, command_poll_interval_seconds = $2,
+                    command_verify_delay_seconds = $3, backup_poll_interval_seconds = $4,
+                    optimizer_interval_seconds = $5, liveness_check_interval_seconds = $6,
+                    offline_alert_seconds = $7, telemetry_retention_days = $8,
+                    backup_retention_count = $9, ntfy_url = $10, ntfy_topic = $11, ntfy_token = $12
+                """,
+                update.ssh_poll_interval_seconds, update.command_poll_interval_seconds,
+                update.command_verify_delay_seconds, update.backup_poll_interval_seconds,
+                update.optimizer_interval_seconds, update.liveness_check_interval_seconds,
+                update.offline_alert_seconds, update.telemetry_retention_days,
+                update.backup_retention_count, update.ntfy_url, update.ntfy_topic, update.ntfy_token,
+            )
+        else:
+            # Blank/omitted ntfy_token leaves whatever's already stored
+            # untouched, rather than clearing it - see models.AppSettingsUpdate.
+            await conn.execute(
+                """
+                UPDATE app_settings SET
+                    ssh_poll_interval_seconds = $1, command_poll_interval_seconds = $2,
+                    command_verify_delay_seconds = $3, backup_poll_interval_seconds = $4,
+                    optimizer_interval_seconds = $5, liveness_check_interval_seconds = $6,
+                    offline_alert_seconds = $7, telemetry_retention_days = $8,
+                    backup_retention_count = $9, ntfy_url = $10, ntfy_topic = $11
+                """,
+                update.ssh_poll_interval_seconds, update.command_poll_interval_seconds,
+                update.command_verify_delay_seconds, update.backup_poll_interval_seconds,
+                update.optimizer_interval_seconds, update.liveness_check_interval_seconds,
+                update.offline_alert_seconds, update.telemetry_retention_days,
+                update.backup_retention_count, update.ntfy_url, update.ntfy_topic,
+            )
+
+    scheduler.reschedule_job("poll_telemetry", trigger="interval", seconds=update.ssh_poll_interval_seconds)
+    scheduler.reschedule_job("apply_pending_commands", trigger="interval", seconds=update.command_poll_interval_seconds)
+    scheduler.reschedule_job("check_in_flight_commands", trigger="interval", seconds=update.command_poll_interval_seconds)
+    scheduler.reschedule_job("poll_backups", trigger="interval", seconds=update.backup_poll_interval_seconds)
+    scheduler.reschedule_job("run_optimizer_pass", trigger="interval", seconds=update.optimizer_interval_seconds)
+    scheduler.reschedule_job("check_device_liveness", trigger="interval", seconds=update.liveness_check_interval_seconds)
+    await ensure_retention_policies(pool, update.telemetry_retention_days)
+    logger.warning("App settings updated via dashboard")
+
+
+@app.post("/api/app-settings/test-notification", status_code=200, dependencies=[Depends(require_token)])
+async def test_app_notification():
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            sent = await send_test_notification(conn)
+        except Exception as exc:
+            raise HTTPException(400, f"failed to send test notification: {exc}")
+    if not sent:
+        raise HTTPException(400, "ntfy_url/ntfy_topic not set - nothing to test")
+    return {"status": "sent"}
+
+
+@app.get("/api/backups", response_model=list[BackupHistoryEntry], dependencies=[Depends(require_token)])
+async def get_backup_history(limit: int = Query(default=100, gt=0, le=1000)):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT b.id, d.mac AS device_mac, d.role AS device_role, b.created_at, b.sha256, b.size_bytes
+            FROM device_backups b JOIN devices d ON d.id = b.device_id
+            ORDER BY b.created_at DESC LIMIT $1
+            """,
+            limit,
+        )
+        return [BackupHistoryEntry(**dict(r)) for r in rows]
+
+
+@app.get("/api/backups/{backup_id}/download", dependencies=[Depends(require_token)])
+async def download_backup(backup_id: int):
+    # Not response_model'd (raw binary, not JSON) - a human pulls this down
+    # to manually restore via scp/ssh onto the device, the same last-mile
+    # step hobo_cams' restore.sh does, just sourced from here instead of a
+    # local dated folder.
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT b.archive, b.created_at, d.mac, d.role FROM device_backups b
+            JOIN devices d ON d.id = b.device_id WHERE b.id = $1
+            """,
+            backup_id,
+        )
+        if not row:
+            raise HTTPException(404, "unknown backup")
+        filename = f"{row['role']}-{row['mac']}-{row['created_at']:%Y%m%dT%H%M%SZ}.tar.gz"
+        return Response(
+            content=row["archive"],
+            media_type="application/gzip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+
+@app.post("/api/backups/{backup_id}/restore", dependencies=[Depends(require_token)])
+async def restore_backup(backup_id: int):
+    # Usable any time the target device is reachable over the existing
+    # key-based SSH connection - not just during initial provisioning.
+    # e.g. "this device got reset/swapped, put the last known-good config
+    # back on it."
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT b.archive, d.role FROM device_backups b
+            JOIN devices d ON d.id = b.device_id WHERE b.id = $1
+            """,
+            backup_id,
+        )
+        if not row:
+            raise HTTPException(404, "unknown backup")
+        target = await conn.fetchrow(
+            "SELECT ssh_host, ssh_port, ssh_user FROM device_targets WHERE role = $1", row["role"],
+        )
+        if not target:
+            raise HTTPException(404, f"no device_targets entry configured for role {row['role']}")
+    try:
+        await device_client.restore_backup(
+            target["ssh_host"], target["ssh_port"], target["ssh_user"], SSH_KEY_PATH, row["archive"],
+        )
+    except Exception as exc:
+        raise HTTPException(502, f"restore failed: {exc}")
+    logger.warning("Backup %d restored to %s (%s)", backup_id, row["role"], target["ssh_host"])
+    return {"status": "ok"}
+
+
+@app.get("/api/device-targets", response_model=list[DeviceTarget], dependencies=[Depends(require_token)])
+async def get_device_targets():
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT role, label, ssh_host, ssh_port, ssh_user,
+                   provisioned_at, last_provision_status, last_provision_error
+            FROM device_targets ORDER BY role
+            """
+        )
+        return [DeviceTarget(**dict(r)) for r in rows]
+
+
+@app.post("/api/device-targets/{role}", status_code=204, dependencies=[Depends(require_token)])
+async def update_device_target(role: str, request: Request):
+    update = await parse_body(request, DeviceTargetUpdate)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE device_targets SET
+                ssh_host = $2, ssh_port = $3, ssh_user = $4,
+                label = COALESCE($5, label), updated_at = now()
+            WHERE role = $1
+            """,
+            role, update.ssh_host, update.ssh_port, update.ssh_user, update.label,
+        )
+    if result == "UPDATE 0":
+        raise HTTPException(404, f"unknown device role {role}")
+    logger.warning("Device target updated via dashboard: %s -> %s:%s", role, update.ssh_host, update.ssh_port)
+
+
+@app.post("/api/device-targets/{role}/provision", dependencies=[Depends(require_token)])
+async def provision_device(role: str, request: Request):
+    # Full zero-touch bootstrap of a brand-new device: installs our SSH
+    # key (password-authenticated, one time only), pushes wifi-agent.sh +
+    # the boot-init script, optionally restores a prior backup, then
+    # reboots. The password is used only for this one call and is never
+    # stored, logged, or persisted - see device_client.provision.
+    body = await parse_body(request, ProvisionRequest)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        target = await conn.fetchrow(
+            "SELECT ssh_host, ssh_port, ssh_user FROM device_targets WHERE role = $1", role,
+        )
+        if not target:
+            raise HTTPException(404, f"unknown device role {role}")
+        restore_archive = None
+        if body.restore_backup_id is not None:
+            restore_archive = await conn.fetchval(
+                "SELECT archive FROM device_backups WHERE id = $1", body.restore_backup_id,
+            )
+            if restore_archive is None:
+                raise HTTPException(404, f"unknown backup {body.restore_backup_id}")
+
+    try:
+        await device_client.provision(
+            target["ssh_host"], target["ssh_port"], target["ssh_user"], body.password, restore_archive,
+        )
+    except Exception as exc:
+        error = str(exc)[:500]
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE device_targets SET last_provision_status = 'failed', last_provision_error = $2 WHERE role = $1",
+                role, error,
+            )
+        raise HTTPException(502, f"provisioning failed: {error}")
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE device_targets SET
+                provisioned_at = now(), last_provision_status = 'ok', last_provision_error = NULL
+            WHERE role = $1
+            """,
+            role,
+        )
+    logger.warning("Device %s provisioned via dashboard (%s)", role, target["ssh_host"])
+    return {"status": "ok"}
+
+
 @app.get("/")
 async def root():
     return RedirectResponse("/dashboard")
 
 
-@app.get("/dashboard")
-async def dashboard_page():
+def _render_app_page() -> HTMLResponse:
     # Injects the shared token server-side so the browser never has to
     # prompt for or store it - access control for a human is expected to
     # happen at the reverse proxy (Authelia), not here. The token itself
     # stays required on the API routes regardless, as defense in depth
     # against this same container also being reachable via the open,
     # un-authelia'd device API domain.
+    #
+    # /dashboard and /settings both serve this same page - it's a single
+    # HTML document with both views built in, and switches between them
+    # client-side (see dashboard.html's showTab()) instead of doing a full
+    # page navigation on every tab click.
     with open("static/dashboard.html", encoding="utf-8") as f:
         html = f.read()
     html = html.replace("__API_TOKEN__", json.dumps(API_TOKEN))
     return HTMLResponse(html)
+
+
+@app.get("/dashboard")
+async def dashboard_page():
+    return _render_app_page()
+
+
+@app.get("/settings")
+async def settings_page():
+    return _render_app_page()
 
 
 @app.get("/health")

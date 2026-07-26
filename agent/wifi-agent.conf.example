@@ -2,3 +2,10 @@
 AGENT_ROLE=AP
 AGENT_SERVER_URL=http://192.168.2.1:8080
 AGENT_API_TOKEN=changeme
+
+# Optional: how often (seconds) the agent pushes a config backup snapshot
+# to the server for versioned history (see README's "Automated config
+# backups"). Uploads are deduped server-side by content hash, so a short
+# interval doesn't spam the DB with redundant copies - it just means a
+# real config change gets captured sooner. Defaults to 21600 (6h) if unset.
+AGENT_BACKUP_INTERVAL_SECONDS=21600

@@ -153,6 +153,7 @@ async def _evaluate_halow_link(pool: asyncpg.Pool, settings):
                 f"degraded (avg retries={avg_retries:.3f} over {sustain_minutes}m), cycling channel",
             )
             await notify(
+                conn,
                 "WiFi Optimizer: HaLow link degraded",
                 f"AP {ap['mac']}: sustained avg retries {avg_retries:.1%} over {sustain_minutes}m - "
                 f"cycling channel {cur_channel} -> {next_channel} ({cur_bw}MHz)",
@@ -313,6 +314,7 @@ async def _evaluate_wifi24_link(pool: asyncpg.Pool, settings):
             sta["mac"], avg_retries, sustain_minutes, current_channel, next_channel,
         )
         await notify(
+            conn,
             "WiFi Optimizer: 2.4GHz link degraded",
             f"STA {sta['mac']}: sustained avg client retries {avg_retries:.1%} over {sustain_minutes}m - "
             f"cycling channel {current_channel} -> {next_channel}",

@@ -1,0 +1,12 @@
+#!/bin/sh /etc/rc.common
+# Minimal boot-time hook - unlike the old wifi-agent.init, this does not
+# run a continuous background service (there's nothing for it to loop on
+# anymore: the server initiates all telemetry/command/backup traffic over
+# SSH, see wifi-agent.sh's header comment). The one thing that still needs
+# to happen automatically at boot, independent of whether the server ever
+# reaches this device, is the HaLow radio channel recovery check.
+START=99
+
+start() {
+    /usr/bin/wifi-agent.sh recover-radio
+}

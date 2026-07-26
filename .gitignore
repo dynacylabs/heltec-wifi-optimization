@@ -2,3 +2,8 @@
 pgdata/
 docker-compose.override.yml
 __pycache__/
+
+# SSH keypair used by the app to reach the Heltec devices (see README's
+# "Deploying the agent" section) - private key material, never commit it.
+secrets/
+ecoworthy-dashboard/

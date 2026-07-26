@@ -1,13 +1,13 @@
 import os
 
 DATABASE_URL = os.environ["DATABASE_URL"]
-OPTIMIZER_INTERVAL_SECONDS = int(os.environ.get("OPTIMIZER_INTERVAL_SECONDS", "300"))
 
-# Shared secret required on every device-facing endpoint (as a ?token=
-# query param, not a header - the OpenWrt agent only has busybox wget,
-# which has no --header support). Required, no default: this becomes the
-# only thing standing between the internet and this API once it's exposed
-# through a reverse proxy.
+# Shared secret required on every dashboard-facing /api/* route. There is
+# no device-facing HTTP API anymore (see "Reaching the devices" below) -
+# the server reaches out to the devices over SSH instead, so this token's
+# only remaining job is gating the browser-facing dashboard/API, which
+# stays behind whatever reverse proxy/auth layer you put in front of this
+# domain. Required, no default.
 API_TOKEN = os.environ["API_TOKEN"]
 
 DEFAULT_COMMAND_TTL_SECONDS = {
@@ -16,48 +16,46 @@ DEFAULT_COMMAND_TTL_SECONDS = {
     "reboot": 60,
 }
 
+# Reaching the devices: the server initiates every connection over SSH
+# (app/ssh_client.py, app/device_client.py) rather than the old design
+# where each device's agent pushed telemetry/commands-polling out to the
+# server over HTTP. That flip exists specifically so this server never
+# needs to accept inbound connections from the devices' network segment -
+# see README's "Reaching the devices over SSH" for the full rationale.
+#
+# Which host/port/user to dial for each role (AP/STA) now lives in the
+# `device_targets` DB table, editable from the dashboard's Device Setup
+# section (see main.py's /api/device-targets) - not here. This lets a
+# fresh deployment be pointed at brand-new devices without touching
+# docker-compose.yml or restarting the container. What stays here is only
+# the one thing shared across every device regardless of host/user: the
+# server's own SSH keypair.
+#
+# Path *inside the container* to the private half of a keypair dedicated
+# to this purpose (not your personal admin key - see README, same
+# reasoning as the ntfy token being scoped to one job). Mount it in via
+# docker-compose as a read-only volume; never bake it into the image.
+#
+# This (along with DATABASE_URL/API_TOKEN above) is deliberately one of
+# the few things NOT DB-backed/dashboard-editable, unlike everything else
+# in the old config.py - it's a bootstrapping secret the app needs before
+# it can even open a DB connection, or a file path tied to a docker-compose
+# volume mount that a running container can't retarget on its own anyway.
+SSH_KEY_PATH = os.environ.get("SSH_KEY_PATH", "/run/secrets/wifi_optimizer_ssh_key")
+# Public half of the same keypair - read at provisioning time to install
+# onto a brand-new device's authorized_keys (see device_client.provision).
+SSH_PUBLIC_KEY_PATH = os.environ.get("SSH_PUBLIC_KEY_PATH", SSH_KEY_PATH + ".pub")
+
 # Standard non-overlapping 2.4GHz channels (US). Unlike HaLow, there's no
 # bandwidth-dependent numbering complexity here. Structural (which channels
 # exist), not a tunable threshold, so it stays here rather than in the
-# DB-backed optimizer_state settings (see optimizer.py).
+# DB-backed settings tables.
 WIFI24_CHANNELS = [1, 6, 11]
 
-# All *thresholds* the optimizer uses (retry rate, sustain windows,
-# utilization) now live in the DB (optimizer_state table, tunable from the
-# dashboard's Settings section) instead of here - see optimizer.py and
-# migration 007. What's left here is structural, not something you'd tune
-# per-deployment.
-
-# ntfy (https://ntfy.sh or self-hosted) push alerts for: a device going
-# offline/coming back, a command getting reverted, and sustained
-# degradation triggering an optimizer command. Optional - leave blank to
-# disable alerting entirely (this repo stays host-agnostic; ntfy is a
-# convenience, not a dependency). NTFY_TOKEN is only required if your
-# instance doesn't allow anonymous publish to the topic (e.g.
-# auth-default-access: deny-all) - generate one with
-# `ntfy token add <user>` scoped to a write-only user for this topic,
-# rather than using a full account password here.
-NTFY_URL = os.environ.get("NTFY_URL", "").rstrip("/")
-NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
-NTFY_TOKEN = os.environ.get("NTFY_TOKEN", "")
-NTFY_ENABLED = bool(NTFY_URL and NTFY_TOPIC)
-
-# How long a device can go without a telemetry POST before it's considered
-# offline and worth alerting on (vs. the dashboard's 90s "online" dot, which
-# is meant to be a quick glance, not gate a push notification).
-OFFLINE_ALERT_SECONDS = int(os.environ.get("OFFLINE_ALERT_SECONDS", "300"))
-# How often the liveness check runs.
-LIVENESS_CHECK_INTERVAL_SECONDS = int(os.environ.get("LIVENESS_CHECK_INTERVAL_SECONDS", "60"))
-
-# TimescaleDB retention: telemetry/radio_clients rows older than this get
-# dropped automatically. 0 (the default) means keep everything forever -
-# no retention policy is applied at all, which is the point if you actually
-# want a full history (e.g. year-over-year signal comparison via the
-# dashboard's long-range presets). Applied idempotently at startup (db.py):
-# add_retention_policy(if_not_exists=True) if > 0, remove_retention_policy
-# (if_exists=True) if 0 - so flipping this from a real number back to 0
-# actually removes a previously-applied policy on the next restart, not
-# just skip adding a new one. Changing a *nonzero* value after the policy
-# already exists still requires manually removing the old one first (see
-# README), since if_not_exists won't update an existing policy's interval.
-TELEMETRY_RETENTION_DAYS = int(os.environ.get("TELEMETRY_RETENTION_DAYS", "0"))
+# Everything else that used to live here as an env var - poll intervals
+# (SSH/command/backup/optimizer/liveness), offline alert threshold,
+# telemetry/backup retention, and ntfy alerting config - now lives in the
+# DB (`app_settings` table, migration 011), editable from the dashboard's
+# System Settings section, same as the optimizer's detection thresholds
+# already were (`optimizer_state`, migration 007). See main.py's
+# `_get_app_settings` and README's "Configuring app settings".

@@ -19,22 +19,34 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://wifioptimizer:changeme@timescaledb:5432/wifioptimizer
-      OPTIMIZER_INTERVAL_SECONDS: "300"
+      # Dashboard-only now - the devices are never sent this token, and
+      # never call back into the server at all. See README's "Reaching the
+      # devices over SSH".
       API_TOKEN: changeme
-      # Optional ntfy (https://ntfy.sh or self-hosted) push alerts - device
-      # offline/back online, a command getting reverted, sustained
-      # degradation. Leave both blank to disable alerting entirely.
-      NTFY_URL: ""
-      NTFY_TOPIC: ""
-      # Only needed if your ntfy instance doesn't allow anonymous publish
-      # to the topic - see config.py's comment.
-      NTFY_TOKEN: ""
-      OFFLINE_ALERT_SECONDS: "300"
-      LIVENESS_CHECK_INTERVAL_SECONDS: "60"
-      # telemetry/radio_clients rows older than this are dropped
-      # automatically (TimescaleDB retention policy, applied at startup).
-      # 0 = keep everything forever (no policy applied).
-      TELEMETRY_RETENTION_DAYS: "0"
+      # Everything else that used to be here - poll intervals, alert/
+      # retention thresholds, ntfy alerting - is now editable from the
+      # dashboard's System Settings section (app_settings table, migration
+      # 011) instead of being set here. A fresh deployment starts with
+      # sane defaults (seeded by the migration) and needs no further env
+      # vars beyond what's below. See README's "Configuring app settings".
+      #
+      # Per-device SSH host/port/user (AP/STA) similarly lives in the
+      # device_targets DB table (migration 010), editable from the
+      # dashboard's Device Setup section - not here. Only the shared
+      # server SSH keypair path stays as an env var/volume mount, since
+      # it's the same key for every device regardless of host/user, and a
+      # running container can't retarget its own volume mounts anyway.
+      SSH_KEY_PATH: "/run/secrets/wifi_optimizer_ssh_key"
+      SSH_PUBLIC_KEY_PATH: "/run/secrets/wifi_optimizer_ssh_key.pub"
+    volumes:
+      - ./secrets/wifi_optimizer_ed25519:/run/secrets/wifi_optimizer_ssh_key:ro
+      - ./secrets/wifi_optimizer_ed25519.pub:/run/secrets/wifi_optimizer_ssh_key.pub:ro
+      # Read-only so the app container can push wifi-agent.sh + the
+      # boot-init script onto a brand-new device during zero-touch
+      # provisioning (see device_client.provision) - the app image itself
+      # doesn't build from this directory (its Dockerfile's build context
+      # is ./app only), so this is how it gets access to them at runtime.
+      - ./agent:/agent:ro
     depends_on:
       - timescaledb
     ports:

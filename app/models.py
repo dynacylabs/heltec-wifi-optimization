@@ -4,44 +4,44 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
-class RadioClient(BaseModel):
+class RadioClientRaw(BaseModel):
+    # Cumulative since-boot counters, as read straight off the device -
+    # unlike the old push-based agent, there's no persistent per-device
+    # /tmp state between one-shot SSH invocations to compute a delta
+    # on-device, so the raw counters travel here and main.py computes the
+    # rate against the previous poll's counters (device_radio_client_counters
+    # table, migration 009).
     mac: str
-    host: Optional[str] = None
     rssi: Optional[int] = None
     rate_mbps: Optional[float] = None
-    retries: Optional[float] = None  # fraction of frames retried this interval
+    retries_cum: Optional[int] = None
+    packets_cum: Optional[int] = None
 
 
-class RadioTelemetry(BaseModel):
+class RadioTelemetryRaw(BaseModel):
     radio: Literal["halow", "wifi24"]
     rssi: Optional[int] = None
     noise: Optional[int] = None
     mcs: Optional[int] = None
     rate_mbps: Optional[float] = None
-    retries: Optional[float] = None  # fraction of frames retried this interval
     channel: Optional[int] = None
     bandwidth_mhz: Optional[int] = None
-    throughput_mbps: Optional[float] = None  # actual data throughput, vs rate_mbps' PHY rate
-    clients: list[RadioClient] = []
+    retries_cum: Optional[int] = None
+    packets_cum: Optional[int] = None
+    tx_bytes_cum: Optional[int] = None
+    rx_bytes_cum: Optional[int] = None
+    clients: list[RadioClientRaw] = []
 
 
-class TelemetryReport(BaseModel):
+class CollectResult(BaseModel):
+    # Shape of `wifi-agent.sh collect`'s stdout (see device_client.py) -
+    # device_mac/hostname only, no `role`: the server already knows which
+    # role it asked for, from which SSH host it dialed (device_targets
+    # table, see DeviceTarget below), unlike the old push model where the
+    # device had to self-report it.
     device_mac: str
     hostname: Optional[str] = None
-    role: Optional[Literal["AP", "STA"]] = None
-    radios: list[RadioTelemetry]
-
-
-class CommandOut(BaseModel):
-    command_id: int
-    param: str
-    target_value: dict
-    ttl_seconds: int
-
-
-class CommandReport(BaseModel):
-    status: Literal["applied", "acked", "reverted"]
-    reason: Optional[str] = None
+    radios: list[RadioTelemetryRaw]
 
 
 class RadioSnapshot(BaseModel):
@@ -126,3 +126,83 @@ class OptimizerSettings(BaseModel):
     bandwidth_widen_sustain_minutes: int = Field(gt=0)
     bandwidth_narrow_utilization_threshold: float = Field(ge=0, le=1)
     bandwidth_narrow_sustain_minutes: int = Field(gt=0)
+
+
+class BackupHistoryEntry(BaseModel):
+    id: int
+    device_mac: str
+    device_role: Literal["AP", "STA"]
+    created_at: datetime
+    sha256: str
+    size_bytes: int
+
+
+class DeviceTarget(BaseModel):
+    # SSH connection config for a device, editable from the dashboard's
+    # Device Setup section (device_targets table, migration 010) - this
+    # is what replaced the old AP_SSH_HOST/STA_SSH_HOST/SSH_USER env vars.
+    role: str
+    label: str
+    ssh_host: str
+    ssh_port: int
+    ssh_user: str
+    provisioned_at: Optional[datetime] = None
+    last_provision_status: Optional[str] = None
+    last_provision_error: Optional[str] = None
+
+
+class DeviceTargetUpdate(BaseModel):
+    ssh_host: str = Field(min_length=1)
+    ssh_port: int = Field(default=22, gt=0, le=65535)
+    ssh_user: str = Field(default="root", min_length=1)
+    label: Optional[str] = None
+
+
+class ProvisionRequest(BaseModel):
+    # password is used exactly once, to authenticate the single
+    # bootstrap SSH session that installs our key onto a brand-new
+    # device (see device_client.provision) - it is never stored, logged,
+    # or persisted anywhere past that one call.
+    password: str = Field(min_length=1)
+    restore_backup_id: Optional[int] = None
+
+
+class AppSettings(BaseModel):
+    # Everything that used to be a docker-compose.yml env var and isn't a
+    # bootstrap secret (DATABASE_URL/API_TOKEN/SSH_KEY_PATH stay env vars -
+    # see config.py) - poll intervals, alert/retention thresholds, and
+    # ntfy alerting config (app_settings table, migration 011). Response
+    # model for GET /api/app-settings.
+    ssh_poll_interval_seconds: int
+    command_poll_interval_seconds: int
+    command_verify_delay_seconds: int
+    backup_poll_interval_seconds: int
+    optimizer_interval_seconds: int
+    liveness_check_interval_seconds: int
+    offline_alert_seconds: int
+    telemetry_retention_days: int
+    backup_retention_count: int
+    ntfy_url: str
+    ntfy_topic: str
+    # Never echoes the actual token back to the browser - just whether one
+    # is currently set, same reasoning as not returning password hashes.
+    ntfy_token_set: bool
+
+
+class AppSettingsUpdate(BaseModel):
+    ssh_poll_interval_seconds: int = Field(gt=0)
+    command_poll_interval_seconds: int = Field(gt=0)
+    command_verify_delay_seconds: int = Field(gt=0)
+    backup_poll_interval_seconds: int = Field(gt=0)
+    optimizer_interval_seconds: int = Field(gt=0)
+    liveness_check_interval_seconds: int = Field(gt=0)
+    offline_alert_seconds: int = Field(gt=0)
+    telemetry_retention_days: int = Field(ge=0)
+    backup_retention_count: int = Field(ge=0)
+    ntfy_url: str = ""
+    ntfy_topic: str = ""
+    # None or "" leaves the currently-stored token unchanged - there's no
+    # way to explicitly clear it back to blank other than clearing
+    # ntfy_url too (which disables alerting entirely), same trade-off as
+    # most "update credentials" forms that never show the current secret.
+    ntfy_token: Optional[str] = None
