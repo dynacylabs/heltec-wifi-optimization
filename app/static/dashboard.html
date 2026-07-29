@@ -972,6 +972,33 @@ function refreshAll() {
 }
 
 showApp();
+
+// ==================== Swipe-to-switch-tabs relay (combined dashboard only) ====================
+// When this app is embedded as an iframe in hobocams-dashboard's combined
+// page, a touch swipe over this page's own content never reaches the
+// parent page's listeners - iframes are a separate browsing context.
+// This relays the same gesture up via postMessage so the parent can
+// still switch tabs from anywhere, not just its header/edges. A no-op
+// entirely when this page isn't embedded (e.g. opened directly).
+if (window.parent !== window) {
+  (function () {
+    let startX = 0;
+    let startY = 0;
+    document.addEventListener("touchstart", (e) => {
+      const t = e.touches[0];
+      startX = t.clientX;
+      startY = t.clientY;
+    }, { passive: true });
+    document.addEventListener("touchend", (e) => {
+      const t = e.changedTouches[0];
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+      const MIN_SWIPE_PX = 50;
+      if (Math.abs(dx) < MIN_SWIPE_PX || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+      window.parent.postMessage({ type: "hobocams-swipe", direction: dx < 0 ? 1 : -1 }, "*");
+    }, { passive: true });
+  })();
+}
 </script>
 
 </body>
