@@ -259,6 +259,14 @@
   <div id="settings-box">
     <div class="settings-grid">
       <div class="settings-card">
+        <div class="settings-card-title">HaLow Channel Optimization</div>
+        <div class="settings-field">
+          <label for="set-halow-enabled">Allow channel/bandwidth changes</label>
+          <span class="settings-input"><input type="checkbox" id="set-halow-enabled"></span>
+        </div>
+        <div class="chart-help" style="margin: 6px 0 0;">Off by default since 2026-07-31: every HaLow channel/bandwidth change attempted live has failed to apply on this hardware, one badly enough to strand the AP requiring a physical reboot. Degradation detection/cooldown/widen/narrow settings below only take effect once this is on. The 2.4GHz link is unaffected by this switch.</div>
+      </div>
+      <div class="settings-card">
         <div class="settings-card-title">Degradation Detection</div>
         <div class="settings-field">
           <label for="set-retry-threshold">Retry rate above</label>
@@ -464,6 +472,7 @@ async function loadSettings() {
   const resp = await api("/api/settings");
   if (!resp.ok) return;
   const s = await resp.json();
+  document.getElementById("set-halow-enabled").checked = s.halow_channel_optimization_enabled;
   document.getElementById("set-retry-threshold").value = Math.round(s.retry_rate_degraded_threshold * 100);
   document.getElementById("set-degraded-sustain").value = s.degraded_sustain_minutes;
   document.getElementById("set-cooldown").value = s.channel_cooldown_minutes;
@@ -476,6 +485,7 @@ async function loadSettings() {
 async function saveSettings() {
   const statusEl = document.getElementById("settings-status");
   const body = {
+    halow_channel_optimization_enabled: document.getElementById("set-halow-enabled").checked,
     retry_rate_degraded_threshold: parseFloat(document.getElementById("set-retry-threshold").value) / 100,
     degraded_sustain_minutes: parseInt(document.getElementById("set-degraded-sustain").value, 10),
     channel_cooldown_minutes: parseInt(document.getElementById("set-cooldown").value, 10),

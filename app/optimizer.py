@@ -24,14 +24,23 @@ async def run_optimizer_pass(pool: asyncpg.Pool):
                 SELECT enabled, retry_rate_degraded_threshold, degraded_sustain_minutes,
                        channel_cooldown_minutes, bandwidth_widen_utilization_threshold,
                        bandwidth_widen_sustain_minutes, bandwidth_narrow_utilization_threshold,
-                       bandwidth_narrow_sustain_minutes
+                       bandwidth_narrow_sustain_minutes, halow_channel_optimization_enabled
                 FROM optimizer_state LIMIT 1
                 """
             )
         if not settings["enabled"]:
             logger.info("Optimizer paused via kill switch, skipping this pass")
             return
-        await _evaluate_halow_link(pool, settings)
+        # Separate, narrower switch than the master kill switch above - see
+        # migration 012. Every halow_operating_freq change attempted live
+        # (2026-07-31 incident) failed to apply on this hardware, one
+        # badly enough to require a physical reboot to recover from - see
+        # README/Gotchas. Leave this off independent of the 2.4GHz
+        # degraded-link cycling below, which is unaffected.
+        if settings["halow_channel_optimization_enabled"]:
+            await _evaluate_halow_link(pool, settings)
+        else:
+            logger.info("HaLow channel optimization disabled, skipping HaLow evaluation this pass")
         await _evaluate_wifi24_link(pool, settings)
     except Exception:
         logger.exception("optimizer pass failed")
