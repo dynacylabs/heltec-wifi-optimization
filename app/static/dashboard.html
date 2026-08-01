@@ -717,6 +717,18 @@ function colorForIndex(i) {
   return CLIENT_COLORS[i % CLIENT_COLORS.length];
 }
 
+// Chart.js's time scale auto-fits min/max to whatever data points
+// actually exist unless told otherwise - so a gap (device offline,
+// readings not yet flowing) silently shrinks the visible range instead
+// of showing as empty space within the range the user actually picked.
+// Setting explicit min/max to the selected window forces the full
+// range to render every time, gaps included.
+function setChartWindow(chart, hours) {
+  const now = Date.now();
+  chart.options.scales.x.min = now - hours * 3600 * 1000;
+  chart.options.scales.x.max = now;
+}
+
 async function refreshCharts() {
   const statusResp = await api("/api/status");
   if (!statusResp.ok) return;
@@ -793,13 +805,13 @@ async function refreshCharts() {
     }
   }
 
-  charts.rssi.data.datasets = rssiDatasets; charts.rssi.update();
-  charts.retries.data.datasets = retriesDatasets; charts.retries.update();
-  charts.bandwidth.data.datasets = bwDatasets; charts.bandwidth.update();
-  charts.throughput.data.datasets = throughputDatasets; charts.throughput.update();
-  charts.wifi24Retries.data.datasets = clientRetriesDatasets; charts.wifi24Retries.update();
-  charts.wifi24Channel.data.datasets = wifi24ChDatasets; charts.wifi24Channel.update();
-  charts.wifi24Rssi.data.datasets = clientRssiDatasets; charts.wifi24Rssi.update();
+  charts.rssi.data.datasets = rssiDatasets; setChartWindow(charts.rssi, selectedHours); charts.rssi.update();
+  charts.retries.data.datasets = retriesDatasets; setChartWindow(charts.retries, selectedHours); charts.retries.update();
+  charts.bandwidth.data.datasets = bwDatasets; setChartWindow(charts.bandwidth, selectedHours); charts.bandwidth.update();
+  charts.throughput.data.datasets = throughputDatasets; setChartWindow(charts.throughput, selectedHours); charts.throughput.update();
+  charts.wifi24Retries.data.datasets = clientRetriesDatasets; setChartWindow(charts.wifi24Retries, selectedHours); charts.wifi24Retries.update();
+  charts.wifi24Channel.data.datasets = wifi24ChDatasets; setChartWindow(charts.wifi24Channel, selectedHours); charts.wifi24Channel.update();
+  charts.wifi24Rssi.data.datasets = clientRssiDatasets; setChartWindow(charts.wifi24Rssi, selectedHours); charts.wifi24Rssi.update();
 }
 
 function statusBadge(status) {
