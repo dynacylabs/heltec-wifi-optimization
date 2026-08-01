@@ -1,0 +1,9 @@
+# Shell scripts get deployed straight onto OpenWrt devices (see
+# app/device_client.py's provisioning flow, or a plain scp) and run
+# under busybox ash there - CRLF line endings are fragile at best there
+# (shebang lines in particular can break). Force LF regardless of the
+# checking-out machine's core.autocrlf setting - discovered live
+# 2026-08-01 when a Windows checkout's CRLF-converted wifi-agent.sh got
+# pushed to a real device via scp.
+agent/*.sh text eol=lf
+agent/*.init text eol=lf
