@@ -727,6 +727,21 @@ function setChartWindow(chart, hours) {
   const now = Date.now();
   chart.options.scales.x.min = now - hours * 3600 * 1000;
   chart.options.scales.x.max = now;
+
+  // Beyond a day, "10AM" alone is ambiguous - it could be any of the
+  // days in the window. Add the date to every tick so it's obvious
+  // which day a given part of the chart belongs to.
+  if (hours > 24) {
+    chart.options.scales.x.ticks.callback = function (value) {
+      const d = new Date(value);
+      return [
+        d.toLocaleDateString([], { month: "short", day: "numeric" }),
+        d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+      ];
+    };
+  } else {
+    delete chart.options.scales.x.ticks.callback;
+  }
 }
 
 async function refreshCharts() {
