@@ -252,10 +252,41 @@ cmd_apply() {
 
     # Native OpenWrt safe-apply: stages the uci commit above for real, with
     # an automatic rollback if not confirmed within ttl_seconds - the same
-    # mechanism LuCI's own "Save & Apply" countdown uses. Confirmed live
-    # that this alone does not push the change to the radio - reconf is
-    # still required (see header note).
+    # mechanism LuCI's own "Save & Apply" countdown uses. Left in place
+    # for both params as the persistent-config safety net (reverts uci on
+    # its own even if the server can never reconnect to confirm) -
+    # independent of, and in addition to, the live-radio fix below.
     ubus call uci apply "{\"rollback\":true,\"timeout\":$ttl_seconds}"
+
+    # Confirmed live (2026-08-01): a plain `network.wireless reconf` does
+    # NOT reliably push a *same-bandwidth* channel change to this HaLow
+    # radio - four separate channel targets (48, 8, 16, and initially 24)
+    # were tried, and only once this same hard chip-reset sequence
+    # (already used for cold-bringup recovery - see
+    # verify_and_recover_radio/wifi-agent-boot.init) ran ahead of reconf
+    # did the live channel actually move. Only for halow_operating_freq -
+    # wifi24_channel is plain 2.4GHz Wi-Fi, no evidence plain reconf is
+    # insufficient there.
+    #
+    # IMPORTANT: this is only safe for a channel change that keeps the
+    # SAME bandwidth as before. A *bandwidth* change (e.g. 4MHz -> 2MHz)
+    # through this exact same sequence crashed the AP hard, twice, with
+    # two different valid target channels - confirmed to be a firmware-
+    # level issue (traced into hostapd_s1g/chip territory, past anything
+    # fixable from uci/netifd), not a channel-validity or apply-method
+    # problem. The optimizer's widen/narrow (bandwidth-changing) paths
+    # must never be routed through this - see optimizer.py, which keeps
+    # halow_channel_optimization_enabled scoped to same-bandwidth cycling
+    # only. See README/Gotchas for the full incident writeup.
+    if [ "$param" = "halow_operating_freq" ]; then
+        wifi down radio1
+        sleep 2
+        [ -x /morse/scripts/chipreset.sh ] && sh /morse/scripts/chipreset.sh
+        sleep 3
+        wifi up radio1
+        sleep 8
+    fi
+
     ubus call network.wireless reconf
 }
 

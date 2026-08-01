@@ -33,7 +33,12 @@ async def apply_command(
 ) -> None:
     target_json = json.dumps(target_value)
     command = f"{AGENT_PATH} apply {shlex.quote(param)} {shlex.quote(target_json)} {int(ttl_seconds)}"
-    status, _stdout, stderr = await ssh_client.run(host, port, user, key_path, command, timeout=20)
+    # 45s, not 20s: halow_operating_freq's apply now runs the hard
+    # chip-reset sequence (wifi down/chipreset/wifi up, ~13s of sleeps
+    # alone) instead of a plain reconf - see wifi-agent.sh's cmd_apply.
+    # Harmless for wifi24_channel, which returns well within either
+    # timeout.
+    status, _stdout, stderr = await ssh_client.run(host, port, user, key_path, command, timeout=45)
     if status != 0:
         raise RuntimeError(f"apply {param} on {host} exited {status}: {stderr.decode(errors='replace')}")
 

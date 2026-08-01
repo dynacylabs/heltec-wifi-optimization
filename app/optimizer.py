@@ -170,6 +170,19 @@ async def _evaluate_halow_link(pool: asyncpg.Pool, settings):
             )
             return
 
+        # Bandwidth changes (widen/narrow below) are hard-disabled,
+        # independent of halow_channel_optimization_enabled - confirmed
+        # live (2026-07-31, 2026-08-01) to crash the AP hard, twice, with
+        # two different valid target channels and two different apply
+        # methods (plain reconf, and the hard chip-reset sequence that
+        # reliably fixed same-bandwidth channel changes - see
+        # wifi-agent.sh's cmd_apply). Traced into hostapd_s1g/chip
+        # firmware territory - not a channel-validity or apply-method
+        # problem fixable from here. Do not gate this behind a settings
+        # toggle and re-enable without a firmware fix or vendor
+        # guidance - see README/Gotchas for the full incident writeup.
+        return
+
         # 2. Widen - only considered on an otherwise-healthy link (we
         # already returned above if it's degraded). Utilization is actual
         # throughput against the currently negotiated PHY rate, not a
