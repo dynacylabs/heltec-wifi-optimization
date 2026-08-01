@@ -24,24 +24,25 @@ async def run_optimizer_pass(pool: asyncpg.Pool):
                 SELECT enabled, retry_rate_degraded_threshold, degraded_sustain_minutes,
                        channel_cooldown_minutes, bandwidth_widen_utilization_threshold,
                        bandwidth_widen_sustain_minutes, bandwidth_narrow_utilization_threshold,
-                       bandwidth_narrow_sustain_minutes, halow_channel_optimization_enabled
+                       bandwidth_narrow_sustain_minutes, halow_channel_cycling_enabled,
+                       halow_bandwidth_changes_enabled, wifi24_channel_cycling_enabled
                 FROM optimizer_state LIMIT 1
                 """
             )
         if not settings["enabled"]:
             logger.info("Optimizer paused via kill switch, skipping this pass")
             return
-        # Separate, narrower switch than the master kill switch above - see
-        # migration 012. Every halow_operating_freq change attempted live
-        # (2026-07-31 incident) failed to apply on this hardware, one
-        # badly enough to require a physical reboot to recover from - see
-        # README/Gotchas. Leave this off independent of the 2.4GHz
-        # degraded-link cycling below, which is unaffected.
-        if settings["halow_channel_optimization_enabled"]:
+        # Independent, per-behavior switches, separate from the master
+        # kill switch above - see migration 013. _evaluate_halow_link
+        # does its own finer-grained gating internally (channel cycling
+        # vs. bandwidth changes are separately toggleable); only skip
+        # calling it at all if both are off, to avoid the wasted query.
+        if settings["halow_channel_cycling_enabled"] or settings["halow_bandwidth_changes_enabled"]:
             await _evaluate_halow_link(pool, settings)
         else:
-            logger.info("HaLow channel optimization disabled, skipping HaLow evaluation this pass")
-        await _evaluate_wifi24_link(pool, settings)
+            logger.info("HaLow channel cycling and bandwidth changes both disabled, skipping HaLow evaluation this pass")
+        if settings["wifi24_channel_cycling_enabled"]:
+            await _evaluate_wifi24_link(pool, settings)
     except Exception:
         logger.exception("optimizer pass failed")
 
@@ -131,10 +132,22 @@ async def _evaluate_halow_link(pool: asyncpg.Pool, settings):
 
         # 1. Degradation takes priority over anything else - widening or
         # narrowing a link that's actively struggling is likely to make
-        # things worse, not better.
+        # things worse, not better. This safety rule applies regardless
+        # of which sub-toggles are on: a degraded link always blocks
+        # widen/narrow below, even if halow_channel_cycling_enabled
+        # itself is off and nothing gets emitted here - see migration
+        # 013. Only the actual channel-cycling *action* is gated by that
+        # toggle.
         sustain_minutes = settings["degraded_sustain_minutes"]
         avg_retries = await _avg_over_window(conn, "telemetry", "retries", "AND radio = 'halow'", ap["id"], sustain_minutes)
         if avg_retries is not None and avg_retries >= settings["retry_rate_degraded_threshold"]:
+            if not settings["halow_channel_cycling_enabled"]:
+                logger.info(
+                    "HaLow AP %s degraded (avg retries=%.3f over %dm) but channel cycling is disabled - "
+                    "not cycling, and not considering widen/narrow either",
+                    ap["mac"], avg_retries, sustain_minutes,
+                )
+                return
             # Deliberately simple, not scan-informed: there's no real
             # channel-scan telemetry available on this HaLow driver
             # (iwinfo scan returns empty, confirmed live) - so rather than
@@ -168,6 +181,9 @@ async def _evaluate_halow_link(pool: asyncpg.Pool, settings):
                 f"cycling channel {cur_channel} -> {next_channel} ({cur_bw}MHz)",
                 priority="high", tags="warning",
             )
+            return
+
+        if not settings["halow_bandwidth_changes_enabled"]:
             return
 
         # 2. Widen - only considered on an otherwise-healthy link (we

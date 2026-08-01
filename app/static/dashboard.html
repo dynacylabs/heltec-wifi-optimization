@@ -259,12 +259,20 @@
   <div id="settings-box">
     <div class="settings-grid">
       <div class="settings-card">
-        <div class="settings-card-title">HaLow Channel Optimization</div>
+        <div class="settings-card-title">Feature Toggles</div>
         <div class="settings-field">
-          <label for="set-halow-enabled">Allow channel/bandwidth changes</label>
-          <span class="settings-input"><input type="checkbox" id="set-halow-enabled"></span>
+          <label for="set-halow-channel-enabled">HaLow channel cycling</label>
+          <span class="settings-input"><input type="checkbox" id="set-halow-channel-enabled"></span>
         </div>
-        <div class="chart-help" style="margin: 6px 0 0;">Off by default. An earlier incident (2026-07-31) traced to the apply mechanism only doing a wireless-scoped reconf instead of a full netifd reload - fixed 2026-08-01 (see wifi-agent.sh's cmd_apply) and confirmed live for both same-bandwidth channel changes and bandwidth changes (widen/narrow). Degradation detection/cooldown/widen/narrow settings below only take effect once this is on. The 2.4GHz link is unaffected by this switch.</div>
+        <div class="settings-field">
+          <label for="set-halow-bandwidth-enabled">HaLow bandwidth changes (widen/narrow)</label>
+          <span class="settings-input"><input type="checkbox" id="set-halow-bandwidth-enabled"></span>
+        </div>
+        <div class="settings-field">
+          <label for="set-wifi24-channel-enabled">2.4GHz channel cycling</label>
+          <span class="settings-input"><input type="checkbox" id="set-wifi24-channel-enabled"></span>
+        </div>
+        <div class="chart-help" style="margin: 6px 0 0;">Independent switches, separate from the Pause/Resume kill switch above. Degradation detection/cooldown below apply to both radios; widen/narrow only take effect with HaLow bandwidth changes on. No 2.4GHz bandwidth toggle - standard Wi-Fi channels don't have HaLow's bandwidth-tier numbering, so there's nothing to widen/narrow there. HaLow toggles default off, matching a 2026-08-01 fix (see wifi-agent.sh's cmd_apply) confirmed live for both channel and bandwidth changes; 2.4GHz channel cycling defaults on, preserving its prior always-on behavior.</div>
       </div>
       <div class="settings-card">
         <div class="settings-card-title">Degradation Detection</div>
@@ -472,7 +480,9 @@ async function loadSettings() {
   const resp = await api("/api/settings");
   if (!resp.ok) return;
   const s = await resp.json();
-  document.getElementById("set-halow-enabled").checked = s.halow_channel_optimization_enabled;
+  document.getElementById("set-halow-channel-enabled").checked = s.halow_channel_cycling_enabled;
+  document.getElementById("set-halow-bandwidth-enabled").checked = s.halow_bandwidth_changes_enabled;
+  document.getElementById("set-wifi24-channel-enabled").checked = s.wifi24_channel_cycling_enabled;
   document.getElementById("set-retry-threshold").value = Math.round(s.retry_rate_degraded_threshold * 100);
   document.getElementById("set-degraded-sustain").value = s.degraded_sustain_minutes;
   document.getElementById("set-cooldown").value = s.channel_cooldown_minutes;
@@ -485,7 +495,9 @@ async function loadSettings() {
 async function saveSettings() {
   const statusEl = document.getElementById("settings-status");
   const body = {
-    halow_channel_optimization_enabled: document.getElementById("set-halow-enabled").checked,
+    halow_channel_cycling_enabled: document.getElementById("set-halow-channel-enabled").checked,
+    halow_bandwidth_changes_enabled: document.getElementById("set-halow-bandwidth-enabled").checked,
+    wifi24_channel_cycling_enabled: document.getElementById("set-wifi24-channel-enabled").checked,
     retry_rate_degraded_threshold: parseFloat(document.getElementById("set-retry-threshold").value) / 100,
     degraded_sustain_minutes: parseInt(document.getElementById("set-degraded-sustain").value, 10),
     channel_cooldown_minutes: parseInt(document.getElementById("set-cooldown").value, 10),

@@ -684,7 +684,8 @@ async def get_optimizer_settings():
             SELECT retry_rate_degraded_threshold, degraded_sustain_minutes, channel_cooldown_minutes,
                    bandwidth_widen_utilization_threshold, bandwidth_widen_sustain_minutes,
                    bandwidth_narrow_utilization_threshold, bandwidth_narrow_sustain_minutes,
-                   halow_channel_optimization_enabled
+                   halow_channel_cycling_enabled, halow_bandwidth_changes_enabled,
+                   wifi24_channel_cycling_enabled
             FROM optimizer_state LIMIT 1
             """
         )
@@ -706,12 +707,15 @@ async def set_optimizer_settings(request: Request):
                 bandwidth_widen_sustain_minutes = $5,
                 bandwidth_narrow_utilization_threshold = $6,
                 bandwidth_narrow_sustain_minutes = $7,
-                halow_channel_optimization_enabled = $8
+                halow_channel_cycling_enabled = $8,
+                halow_bandwidth_changes_enabled = $9,
+                wifi24_channel_cycling_enabled = $10
             """,
             settings.retry_rate_degraded_threshold, settings.degraded_sustain_minutes,
             settings.channel_cooldown_minutes, settings.bandwidth_widen_utilization_threshold,
             settings.bandwidth_widen_sustain_minutes, settings.bandwidth_narrow_utilization_threshold,
-            settings.bandwidth_narrow_sustain_minutes, settings.halow_channel_optimization_enabled,
+            settings.bandwidth_narrow_sustain_minutes, settings.halow_channel_cycling_enabled,
+            settings.halow_bandwidth_changes_enabled, settings.wifi24_channel_cycling_enabled,
         )
     logger.warning("Optimizer settings updated via dashboard: %s", settings)
 

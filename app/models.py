@@ -126,12 +126,14 @@ class OptimizerSettings(BaseModel):
     bandwidth_widen_sustain_minutes: int = Field(gt=0)
     bandwidth_narrow_utilization_threshold: float = Field(ge=0, le=1)
     bandwidth_narrow_sustain_minutes: int = Field(gt=0)
-    # Separate from the master kill switch (OptimizerState.enabled) - see
-    # migration 012. Off by default: every halow_operating_freq change
-    # attempted live has failed to apply on this hardware, one badly
-    # enough to require a physical reboot. Leave off until the channel
-    # plan's reliability problem is actually resolved.
-    halow_channel_optimization_enabled: bool
+    # Independent, per-behavior switches, separate from the master kill
+    # switch (OptimizerState.enabled) - see migration 013. No
+    # "wifi24_bandwidth" toggle: standard Wi-Fi channels don't have
+    # HaLow's bandwidth-tier numbering, so there's no widen/narrow
+    # behavior on that radio to gate.
+    halow_channel_cycling_enabled: bool
+    halow_bandwidth_changes_enabled: bool
+    wifi24_channel_cycling_enabled: bool
 
 
 class BackupHistoryEntry(BaseModel):
