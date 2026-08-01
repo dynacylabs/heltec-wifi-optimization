@@ -133,9 +133,19 @@ verify_and_recover_radio() {
         sleep 3
         wifi up radio1 2>/dev/null
         sleep 8
-        # A live reconf on top of the fresh bring-up is what actually got the
-        # channel to stick in testing, not the reset/restart alone.
-        ubus call network.wireless reconf 2>/dev/null
+        # Confirmed live (2026-08-01): a full netifd device-handler
+        # reload (what LuCI's own "Save & Apply" actually triggers via
+        # ucitrack, not a plain wireless-scoped reconf) is what reliably
+        # gets a channel/bandwidth change to actually stick - see
+        # cmd_apply's comment. Layered on top of the hard chip reset
+        # above rather than replacing it: this cold-bringup path was
+        # originally written for a lower-level SDIO/kernel failure mode
+        # (hostapd logging `morse_cli ... failed with error code -1`)
+        # that hasn't specifically been retested against the reload
+        # mechanism alone, so keep both rather than assume one subsumes
+        # the other.
+        ubus call network reload 2>/dev/null
+        /sbin/wifi reload_legacy 2>/dev/null
         sleep 8
         ifname="$(halow_ifname)"
         attempt=$((attempt + 1))
@@ -255,39 +265,37 @@ cmd_apply() {
     # mechanism LuCI's own "Save & Apply" countdown uses. Left in place
     # for both params as the persistent-config safety net (reverts uci on
     # its own even if the server can never reconnect to confirm) -
-    # independent of, and in addition to, the live-radio fix below.
+    # independent of, and in addition to, the reload below.
     ubus call uci apply "{\"rollback\":true,\"timeout\":$ttl_seconds}"
 
-    # Confirmed live (2026-08-01): a plain `network.wireless reconf` does
-    # NOT reliably push a *same-bandwidth* channel change to this HaLow
-    # radio - four separate channel targets (48, 8, 16, and initially 24)
-    # were tried, and only once this same hard chip-reset sequence
-    # (already used for cold-bringup recovery - see
-    # verify_and_recover_radio/wifi-agent-boot.init) ran ahead of reconf
-    # did the live channel actually move. Only for halow_operating_freq -
-    # wifi24_channel is plain 2.4GHz Wi-Fi, no evidence plain reconf is
-    # insufficient there.
-    #
-    # IMPORTANT: this is only safe for a channel change that keeps the
-    # SAME bandwidth as before. A *bandwidth* change (e.g. 4MHz -> 2MHz)
-    # through this exact same sequence crashed the AP hard, twice, with
-    # two different valid target channels - confirmed to be a firmware-
-    # level issue (traced into hostapd_s1g/chip territory, past anything
-    # fixable from uci/netifd), not a channel-validity or apply-method
-    # problem. The optimizer's widen/narrow (bandwidth-changing) paths
-    # must never be routed through this - see optimizer.py, which keeps
-    # halow_channel_optimization_enabled scoped to same-bandwidth cycling
-    # only. See README/Gotchas for the full incident writeup.
     if [ "$param" = "halow_operating_freq" ]; then
-        wifi down radio1
-        sleep 2
-        [ -x /morse/scripts/chipreset.sh ] && sh /morse/scripts/chipreset.sh
-        sleep 3
-        wifi up radio1
-        sleep 8
+        # Confirmed live (2026-08-01): a plain `network.wireless reconf`
+        # does NOT reliably push a channel/bandwidth change to this HaLow
+        # radio - several channel-only targets failed via it, and one
+        # bandwidth-changing target (4MHz -> 2MHz) crashed the AP hard
+        # enough to need a physical reboot. Traced the real mechanism by
+        # diffing LuCI's own logged behavior against ours: LuCI's "Save &
+        # Apply" doesn't call network.wireless reconf directly - it goes
+        # through the standard OpenWrt ucitrack "wireless affects
+        # network" mapping (see /etc/config/ucitrack), which triggers
+        # `/etc/init.d/network reload_service()`:
+        #   ubus call network reload
+        #   /sbin/wifi reload_legacy
+        # That's a full netifd device-handler reload (logged as "Adding
+        # device handler type: morse" / "Configuring radio1" / "Full
+        # Channel Information"), not just a wireless-scoped reconf - and
+        # unlike our earlier `wifi down/up radio1` + chip-reset
+        # workaround, it's confirmed live to apply BOTH same-bandwidth
+        # channel changes AND bandwidth changes (4MHz<->2MHz) cleanly,
+        # with the STA reassociating automatically either way. This is
+        # what LuCI has been doing under the hood all along - replicating
+        # it exactly here, rather than the narrower reconf call or the
+        # chip-reset workaround, is what actually fixes this.
+        ubus call network reload
+        /sbin/wifi reload_legacy
+    else
+        ubus call network.wireless reconf
     fi
-
-    ubus call network.wireless reconf
 }
 
 # Reads the live radio state back and compares it to what the command

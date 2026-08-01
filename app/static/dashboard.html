@@ -264,7 +264,7 @@
           <label for="set-halow-enabled">Allow channel/bandwidth changes</label>
           <span class="settings-input"><input type="checkbox" id="set-halow-enabled"></span>
         </div>
-        <div class="chart-help" style="margin: 6px 0 0;">Off by default since 2026-07-31: every HaLow channel/bandwidth change attempted live has failed to apply on this hardware, one badly enough to strand the AP requiring a physical reboot. Degradation detection/cooldown/widen/narrow settings below only take effect once this is on. The 2.4GHz link is unaffected by this switch.</div>
+        <div class="chart-help" style="margin: 6px 0 0;">Off by default. An earlier incident (2026-07-31) traced to the apply mechanism only doing a wireless-scoped reconf instead of a full netifd reload - fixed 2026-08-01 (see wifi-agent.sh's cmd_apply) and confirmed live for both same-bandwidth channel changes and bandwidth changes (widen/narrow). Degradation detection/cooldown/widen/narrow settings below only take effect once this is on. The 2.4GHz link is unaffected by this switch.</div>
       </div>
       <div class="settings-card">
         <div class="settings-card-title">Degradation Detection</div>
