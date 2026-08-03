@@ -204,8 +204,8 @@ verify_and_recover_radio() {
 
 collect_halow() {
     ifname="$(halow_ifname)"
-    radio_up="$(halow_radio_up)"
-    [ -z "$ifname" ] && { printf '{"radio":"halow","radio_up":%s}\n' "$radio_up"; return; }
+    driver_up="$(halow_radio_up)"
+    [ -z "$ifname" ] && { printf '{"radio":"halow","radio_up":%s}\n' "$driver_up"; return; }
 
     info="$(ubus call iwinfo info "{\"device\":\"$ifname\"}" 2>/dev/null)"
     channel="$(echo "$info" | jsonfilter -e '@.channel' 2>/dev/null)"
@@ -228,6 +228,19 @@ collect_halow() {
 
     clients="[]"
     [ -n "$peer_mac" ] && clients="[{\"mac\":\"$peer_mac\",\"rssi\":$(jnum "$signal"),\"rate_mbps\":$(jnum "$rate_mbps"),\"retries_cum\":$(jnum "$retries_cum"),\"packets_cum\":$(jnum "$packets_cum")}]"
+
+    # radio_up means "the link is actually usable", not just "the driver
+    # initialized" - confirmed live (2026-08-03): a bandwidth-change apply
+    # landed the AP's radio cleanly on the target channel with
+    # retry_setup_failed=false, but the STA never followed. A driver-only
+    # check would have reported that as healthy. This is the same peer
+    # check cmd_verify_confirm already does for the halow radio - a P2P
+    # bridge with no peer isn't up, whatever the driver itself thinks.
+    if [ "$driver_up" = "true" ] && [ -n "$peer_mac" ]; then
+        radio_up="true"
+    else
+        radio_up="false"
+    fi
 
     printf '{"radio":"halow","radio_up":%s,"rssi":%s,"noise":%s,"mcs":%s,"rate_mbps":%s,"channel":%s,"bandwidth_mhz":%s,"retries_cum":%s,"packets_cum":%s,"tx_bytes_cum":%s,"rx_bytes_cum":%s,"clients":%s}\n' \
         "$radio_up" "$(jnum "$signal")" "$(jnum "$noise")" "$(jnum "$mcs")" "$(jnum "$rate_mbps")" \
@@ -280,18 +293,26 @@ apply_halow_operating_freq() {
     # $1 = JSON target_value, e.g. {"channel":44}
     # See header note: bandwidth is implied by the channel index itself,
     # there is no separate width uci option to set.
+    #
+    # Deliberately does NOT `uci commit` here - see cmd_apply's comment.
+    # Committing immediately would flush this to disk before `uci apply
+    # --rollback` ever gets a chance to track it as a revertible staged
+    # change, which - confirmed live, 2026-08-03 - makes the rollback
+    # safety net a complete no-op: `ubus call uci changes` came back
+    # empty and a failed apply sat stuck on the bad channel for over 10
+    # minutes (well past the 120s timeout) with nothing reverting it.
     channel="$(echo "$1" | jsonfilter -e '@.channel' 2>/dev/null)"
     [ -z "$channel" ] && { echo "apply_halow_operating_freq: missing channel in $1" >&2; return 1; }
     uci set wireless.radio1.channel="$channel"
-    uci commit wireless
 }
 
 apply_wifi24_channel() {
     # $1 = JSON target_value, e.g. {"channel":6}
+    # No `uci commit` here either - same reasoning as
+    # apply_halow_operating_freq above.
     channel="$(echo "$1" | jsonfilter -e '@.channel' 2>/dev/null)"
     [ -z "$channel" ] && { echo "apply_wifi24_channel: missing channel in $1" >&2; return 1; }
     uci set wireless.radio0.channel="$channel"
-    uci commit wireless
 }
 
 # $1 = param, $2 = target_value JSON, $3 = ttl_seconds. Stages the config
@@ -308,12 +329,14 @@ cmd_apply() {
         *) echo "unknown param $param" >&2; exit 1 ;;
     esac
 
-    # Native OpenWrt safe-apply: stages the uci commit above for real, with
-    # an automatic rollback if not confirmed within ttl_seconds - the same
-    # mechanism LuCI's own "Save & Apply" countdown uses. Left in place
-    # for both params as the persistent-config safety net (reverts uci on
-    # its own even if the server can never reconnect to confirm) -
-    # independent of, and in addition to, the reload below.
+    # Native OpenWrt safe-apply: THIS is what actually commits the `uci
+    # set` above to disk - the same mechanism LuCI's own "Save & Apply"
+    # countdown uses - with an automatic rollback if not confirmed within
+    # ttl_seconds. The persistent-config safety net (reverts uci on its
+    # own even if the server can never reconnect to confirm), independent
+    # of, and in addition to, the reload below. Only works because the
+    # apply_*() functions above stage the change with plain `uci set` and
+    # deliberately don't commit it themselves first.
     ubus call uci apply "{\"rollback\":true,\"timeout\":$ttl_seconds}"
 
     if [ "$param" = "halow_operating_freq" ]; then
