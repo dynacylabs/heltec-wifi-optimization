@@ -1,12 +1,30 @@
 #!/bin/sh /etc/rc.common
-# Minimal boot-time hook - unlike the old wifi-agent.init, this does not
-# run a continuous background service (there's nothing for it to loop on
-# anymore: the server initiates all telemetry/command/backup traffic over
-# SSH, see wifi-agent.sh's header comment). The one thing that still needs
-# to happen automatically at boot, independent of whether the server ever
-# reaches this device, is the HaLow radio channel recovery check.
+# Boot-time hook - unlike the old wifi-agent.init, this does not run a
+# continuous background service (there's nothing for it to loop on anymore:
+# the server initiates all telemetry/command/backup traffic over SSH, see
+# wifi-agent.sh's header comment). What still needs to happen automatically,
+# independent of whether the server ever reaches this device, is the HaLow
+# radio channel recovery check - and, since 2026-08-01, not just at boot.
+#
+# A bad config applied mid-operation (not at boot) can wedge the radio with
+# nothing watching for it until the device's next reboot otherwise -
+# confirmed live: an AP's HaLow chip wedged after a failed optimizer apply
+# and sat that way for hours since nothing re-checked it between boots. So
+# this also registers a periodic cron job for the same check, idempotently,
+# rather than relying on boot alone.
 START=99
+
+CRON_MARKER="wifi-agent.sh recover-radio"
+CRON_LINE="*/15 * * * * /usr/bin/wifi-agent.sh recover-radio"
 
 start() {
     /usr/bin/wifi-agent.sh recover-radio
+
+    crontab_file="/etc/crontabs/root"
+    touch "$crontab_file"
+    if ! grep -qF "$CRON_MARKER" "$crontab_file"; then
+        echo "$CRON_LINE" >> "$crontab_file"
+        /etc/init.d/cron enabled || /etc/init.d/cron enable
+        /etc/init.d/cron restart
+    fi
 }

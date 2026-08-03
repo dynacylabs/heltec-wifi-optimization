@@ -20,6 +20,14 @@ class RadioClientRaw(BaseModel):
 
 class RadioTelemetryRaw(BaseModel):
     radio: Literal["halow", "wifi24"]
+    # Only populated for "halow" - whether the radio interface is actually
+    # up and initialized (ubus network.wireless status's radio1.up &&
+    # !retry_setup_failed), not just whether SSH could reach the device.
+    # Added after 2026-08-01: an AP stayed SSH-reachable the whole time its
+    # HaLow chip was wedged at the SDIO level, so plain telemetry
+    # reachability alone couldn't have caught it - see main.py's
+    # poll_telemetry / _maybe_auto_recover_radio.
+    radio_up: Optional[bool] = None
     rssi: Optional[int] = None
     noise: Optional[int] = None
     mcs: Optional[int] = None
@@ -104,7 +112,7 @@ class CommandHistoryEntry(BaseModel):
     previous_value: Optional[dict] = None
     created_at: datetime
     ttl_seconds: int
-    status: Literal["pending", "applied", "acked", "reverted", "expired"]
+    status: Literal["pending", "applied", "acked", "reverted", "unknown", "expired"]
     applied_at: Optional[datetime] = None
     acked_at: Optional[datetime] = None
     reason: Optional[str] = None

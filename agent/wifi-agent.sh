@@ -80,6 +80,23 @@ halow_ifname() {
     ubus call network.wireless status 2>/dev/null | jsonfilter -e '@.radio1.interfaces[0].ifname' 2>/dev/null
 }
 
+# True only when the radio driver itself is actually up - distinct from
+# whether an ifname/channel/association exists, since a wedged chip (see
+# verify_and_recover_radio) can leave radio1 reporting up=false with
+# retry_setup_failed=true while SSH/the rest of the device is fine. This is
+# what lets the server tell "device unreachable" apart from "device is
+# fine, radio is not" - see cmd_collect and main.py's poll_telemetry.
+halow_radio_up() {
+    status="$(ubus call network.wireless status 2>/dev/null)"
+    up="$(echo "$status" | jsonfilter -e '@.radio1.up' 2>/dev/null)"
+    retry_failed="$(echo "$status" | jsonfilter -e '@.radio1.retry_setup_failed' 2>/dev/null)"
+    if [ "$up" = "true" ] && [ "$retry_failed" != "true" ]; then
+        echo "true"
+    else
+        echo "false"
+    fi
+}
+
 wifi24_ifname() {
     ubus call network.wireless status 2>/dev/null | jsonfilter -e '@.radio0.interfaces[0].ifname' 2>/dev/null
 }
@@ -100,6 +117,15 @@ wifi24_ifname() {
 # solar/battery - doesn't strand the link on a channel the peer isn't
 # listening on.
 verify_and_recover_radio() {
+    # Survives across reboots (unlike /tmp, which is tmpfs) so the escalation
+    # below can tell "first time trying a reboot" apart from "already tried
+    # rebooting and it didn't help" - caps how many times this will reboot
+    # the device on its own so a genuinely persistent hardware fault doesn't
+    # turn into an infinite reboot loop. Cleared the moment the radio is
+    # next confirmed healthy, by any invocation (boot or the periodic cron -
+    # see wifi-agent-boot.init).
+    reboot_count_file="/etc/wifi-agent-reboot-count"
+
     # At boot, radio1's interface may not have registered yet - wait for it
     # rather than silently skipping the check (confirmed live: skipping
     # here means a genuinely wrong channel could go completely unnoticed
@@ -124,6 +150,7 @@ verify_and_recover_radio() {
         live_channel="$(ubus call iwinfo info "{\"device\":\"$ifname\"}" 2>/dev/null | jsonfilter -e '@.channel' 2>/dev/null)"
         if [ "$live_channel" = "$expected_channel" ]; then
             logger -t wifi-agent "HaLow radio confirmed on configured channel $expected_channel"
+            rm -f "$reboot_count_file"
             return 0
         fi
         logger -t wifi-agent "HaLow radio on channel ${live_channel:-none}, expected $expected_channel (recovery attempt $attempt/3) - hard-resetting chip"
@@ -151,13 +178,34 @@ verify_and_recover_radio() {
         attempt=$((attempt + 1))
     done
 
-    logger -t wifi-agent "HaLow radio FAILED to reach configured channel $expected_channel after 3 recovery attempts - manual intervention likely needed"
+    # Chip reset alone didn't recover it. Escalate to a full reboot -
+    # confirmed live (2026-08-01) to clear an SDIO-level probe timeout
+    # (`morse_sdio: probe of mmc0:0001:x failed with error -145`, i.e.
+    # ETIMEDOUT - the chip not responding on the bus at all) that 3
+    # chip-reset attempts alone did not clear. Capped at 2 auto-reboots
+    # across invocations so a genuinely persistent hardware fault doesn't
+    # reboot-loop the device forever - past that, give up and wait for a
+    # human instead.
+    reboot_count="$(cat "$reboot_count_file" 2>/dev/null || echo 0)"
+    if [ "$reboot_count" -ge 2 ]; then
+        logger -t wifi-agent "HaLow radio FAILED to reach configured channel $expected_channel after 3 recovery attempts AND $reboot_count prior auto-reboots - giving up, manual intervention needed"
+        return 1
+    fi
+    echo "$((reboot_count + 1))" > "$reboot_count_file"
+    logger -t wifi-agent "HaLow radio still not on channel $expected_channel after 3 chip-reset attempts (prior auto-reboots: $reboot_count) - rebooting as a last resort"
+    reboot
+    # reboot is asynchronous on OpenWrt (returns before the device actually
+    # goes down) - block here rather than falling through, which would log
+    # a misleading "manual intervention needed" while a reboot is already
+    # in flight.
+    sleep 60
     return 1
 }
 
 collect_halow() {
     ifname="$(halow_ifname)"
-    [ -z "$ifname" ] && { echo '{"radio":"halow"}'; return; }
+    radio_up="$(halow_radio_up)"
+    [ -z "$ifname" ] && { printf '{"radio":"halow","radio_up":%s}\n' "$radio_up"; return; }
 
     info="$(ubus call iwinfo info "{\"device\":\"$ifname\"}" 2>/dev/null)"
     channel="$(echo "$info" | jsonfilter -e '@.channel' 2>/dev/null)"
@@ -181,8 +229,8 @@ collect_halow() {
     clients="[]"
     [ -n "$peer_mac" ] && clients="[{\"mac\":\"$peer_mac\",\"rssi\":$(jnum "$signal"),\"rate_mbps\":$(jnum "$rate_mbps"),\"retries_cum\":$(jnum "$retries_cum"),\"packets_cum\":$(jnum "$packets_cum")}]"
 
-    printf '{"radio":"halow","rssi":%s,"noise":%s,"mcs":%s,"rate_mbps":%s,"channel":%s,"bandwidth_mhz":%s,"retries_cum":%s,"packets_cum":%s,"tx_bytes_cum":%s,"rx_bytes_cum":%s,"clients":%s}\n' \
-        "$(jnum "$signal")" "$(jnum "$noise")" "$(jnum "$mcs")" "$(jnum "$rate_mbps")" \
+    printf '{"radio":"halow","radio_up":%s,"rssi":%s,"noise":%s,"mcs":%s,"rate_mbps":%s,"channel":%s,"bandwidth_mhz":%s,"retries_cum":%s,"packets_cum":%s,"tx_bytes_cum":%s,"rx_bytes_cum":%s,"clients":%s}\n' \
+        "$radio_up" "$(jnum "$signal")" "$(jnum "$noise")" "$(jnum "$mcs")" "$(jnum "$rate_mbps")" \
         "$(jnum "$channel")" "$(jnum "$bw_mhz")" "$(jnum "$retries_cum")" "$(jnum "$packets_cum")" \
         "$(jnum "$tx_bytes_cum")" "$(jnum "$rx_bytes_cum")" "$clients"
 }

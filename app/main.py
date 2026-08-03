@@ -172,7 +172,7 @@ async def check_device_liveness(pool):
             )
 
 
-async def _notify_reverted(conn, command_id: int, reason: str | None):
+async def _notify_command_outcome(conn, command_id: int, title_suffix: str, reason: str | None, tags: str):
     info = await conn.fetchrow(
         """
         SELECT d.mac, d.role, c.param, c.target_value FROM commands c
@@ -183,11 +183,19 @@ async def _notify_reverted(conn, command_id: int, reason: str | None):
     if info:
         await notify(
             conn,
-            f"WiFi Optimizer: {info['role']} command reverted",
-            f"{info['param']} -> {info['target_value']} was reverted: {reason or 'no reason given'}",
+            f"WiFi Optimizer: {info['role']} command {title_suffix}",
+            f"{info['param']} -> {info['target_value']}: {reason or 'no reason given'}",
             priority="high",
-            tags="rotating_light",
+            tags=tags,
         )
+
+
+async def _notify_reverted(conn, command_id: int, reason: str | None):
+    await _notify_command_outcome(conn, command_id, "reverted", reason, "rotating_light")
+
+
+async def _notify_unknown(conn, command_id: int, reason: str | None):
+    await _notify_command_outcome(conn, command_id, "outcome unknown", reason, "grey_question")
 
 
 async def _upsert_radio_counters(conn, device_id, radio: str, retries_cum, packets_cum, tx_bytes_cum, rx_bytes_cum, now):
@@ -289,6 +297,62 @@ async def _get_device_targets(pool) -> dict[str, tuple[str, int, str]]:
     return {r["role"]: (r["ssh_host"], r["ssh_port"], r["ssh_user"]) for r in rows}
 
 
+AUTO_REBOOT_COOLDOWN_SECONDS = 15 * 60
+MAX_CONSECUTIVE_AUTO_REBOOTS = 3
+
+
+async def _maybe_auto_recover_radio(pool, role: str, mac: str, host: str, port: int, user: str):
+    # The on-device recover-radio cron (wifi-agent-boot.init) already tries
+    # a chip reset + reboot escalation on its own 15-minute schedule,
+    # independent of whether we can reach the device at all - but that's a
+    # slower, self-contained backstop. This is a faster, server-driven path
+    # for exactly the case that caused the 2026-08-01 outage: the AP stayed
+    # SSH-reachable the entire time (so nothing was waiting on the on-device
+    # cron - the device was never "unreachable"), but its HaLow radio was
+    # wedged and nothing was watching for that between boots.
+    async with pool.acquire() as conn:
+        device = await conn.fetchrow(
+            "SELECT id, last_auto_reboot_at, consecutive_auto_reboots FROM devices WHERE mac = $1", mac,
+        )
+        if device is None:
+            return
+        if device["last_auto_reboot_at"] is not None:
+            elapsed = (datetime.now(timezone.utc) - device["last_auto_reboot_at"]).total_seconds()
+            if elapsed < AUTO_REBOOT_COOLDOWN_SECONDS:
+                return
+        if device["consecutive_auto_reboots"] >= MAX_CONSECUTIVE_AUTO_REBOOTS:
+            # Rebooting hasn't helped the last few times in a row - this
+            # looks like a persistent hardware fault, not something more of
+            # the same will fix. Stop retrying and rely on the existing
+            # offline-liveness alerting instead of reboot-looping a device
+            # that isn't recovering.
+            return
+        try:
+            await device_client.reboot(host, port, user, SSH_KEY_PATH)
+        except Exception:
+            logger.warning("auto-recovery reboot failed for %s (%s)", role, host, exc_info=True)
+            return
+        attempt = device["consecutive_auto_reboots"] + 1
+        await conn.execute(
+            "UPDATE devices SET last_auto_reboot_at = now(), consecutive_auto_reboots = $2 WHERE id = $1",
+            device["id"], attempt,
+        )
+        await notify(
+            conn,
+            f"WiFi Optimizer: {role} auto-recovery reboot",
+            f"HaLow radio reported down on {role} ({mac}) - issuing an automatic reboot (attempt {attempt}/{MAX_CONSECUTIVE_AUTO_REBOOTS}).",
+            priority="high",
+            tags="arrows_counterclockwise",
+        )
+
+
+async def _reset_auto_recovery(pool, mac: str):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE devices SET consecutive_auto_reboots = 0 WHERE mac = $1 AND consecutive_auto_reboots != 0", mac,
+        )
+
+
 async def poll_telemetry(pool):
     # Server-initiated telemetry pull, one SSH round-trip per device per
     # tick (see device_client.collect) - replaces the old design where each
@@ -303,6 +367,14 @@ async def poll_telemetry(pool):
             await _ingest_collect(pool, role, raw)
         except Exception:
             logger.exception("failed to ingest telemetry for %s (%s)", role, host)
+
+        halow = next((r for r in raw.get("radios", []) if r.get("radio") == "halow"), None)
+        mac = raw.get("device_mac")
+        if halow is not None and mac is not None:
+            if halow.get("radio_up") is False:
+                await _maybe_auto_recover_radio(pool, role, mac, host, port, user)
+            elif halow.get("radio_up") is True:
+                await _reset_auto_recovery(pool, mac)
 
 
 async def apply_pending_commands(pool):
@@ -407,12 +479,17 @@ async def check_in_flight_commands(pool):
                 await _notify_reverted(conn, c["id"], reason)
             elif elapsed >= c["ttl_seconds"] + 15:
                 # Couldn't reach the device to check even after retrying
-                # every tick up to ttl_seconds + 15s - the on-device
-                # rollback timer has certainly lapsed and reverted the
-                # change on its own by now regardless.
-                reason = "could not reach device to confirm within ttl_seconds"
-                await conn.execute("UPDATE commands SET status = 'reverted', reason = $2 WHERE id = $1", c["id"], reason)
-                await _notify_reverted(conn, c["id"], reason)
+                # every tick up to ttl_seconds + 15s. The on-device
+                # rollback timer *should* have reverted the change on its
+                # own by now, but that's not guaranteed - confirmed live
+                # (2026-08-01): a HaLow chip that wedges at the SDIO level
+                # mid-apply can leave the on-device rollback unable to
+                # actually take effect, silently leaving the bad config in
+                # place. Report this as genuinely unknown rather than
+                # asserting a revert that was never actually verified.
+                reason = "could not reach device to confirm - outcome unknown, on-device rollback may not have taken effect"
+                await conn.execute("UPDATE commands SET status = 'unknown', reason = $2 WHERE id = $1", c["id"], reason)
+                await _notify_unknown(conn, c["id"], reason)
             # else: still within the retry window - leave as 'applied', try again next tick.
 
 
