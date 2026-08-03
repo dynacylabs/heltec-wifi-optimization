@@ -312,7 +312,9 @@ async def _maybe_auto_recover_radio(pool, role: str, mac: str, host: str, port: 
     # wedged and nothing was watching for that between boots.
     async with pool.acquire() as conn:
         device = await conn.fetchrow(
-            "SELECT id, last_auto_reboot_at, consecutive_auto_reboots FROM devices WHERE mac = $1", mac,
+            "SELECT id, last_auto_reboot_at, consecutive_auto_reboots, auto_recovery_exhausted_alerted "
+            "FROM devices WHERE mac = $1",
+            mac,
         )
         if device is None:
             return
@@ -323,9 +325,22 @@ async def _maybe_auto_recover_radio(pool, role: str, mac: str, host: str, port: 
         if device["consecutive_auto_reboots"] >= MAX_CONSECUTIVE_AUTO_REBOOTS:
             # Rebooting hasn't helped the last few times in a row - this
             # looks like a persistent hardware fault, not something more of
-            # the same will fix. Stop retrying and rely on the existing
-            # offline-liveness alerting instead of reboot-looping a device
-            # that isn't recovering.
+            # the same will fix. Stop retrying, but alert exactly once for
+            # this transition (rather than staying fully silent from here
+            # on, which is what this branch used to do) so a radio that
+            # stays down past the last attempt doesn't go unnoticed.
+            if not device["auto_recovery_exhausted_alerted"]:
+                await conn.execute(
+                    "UPDATE devices SET auto_recovery_exhausted_alerted = true WHERE id = $1", device["id"],
+                )
+                await notify(
+                    conn,
+                    f"WiFi Optimizer: {role} radio still down - auto-recovery exhausted",
+                    f"HaLow radio on {role} ({mac}) is still down after {MAX_CONSECUTIVE_AUTO_REBOOTS} automatic "
+                    "reboot attempts. This will not keep retrying - manual (physical) intervention is needed.",
+                    priority="high",
+                    tags="rotating_light",
+                )
             return
         try:
             await device_client.reboot(host, port, user, SSH_KEY_PATH)
@@ -340,16 +355,30 @@ async def _maybe_auto_recover_radio(pool, role: str, mac: str, host: str, port: 
         await notify(
             conn,
             f"WiFi Optimizer: {role} auto-recovery reboot",
-            f"HaLow radio reported down on {role} ({mac}) - issuing an automatic reboot (attempt {attempt}/{MAX_CONSECUTIVE_AUTO_REBOOTS}).",
+            f"HaLow radio reported down on {role} ({mac}) - issuing an automatic reboot (attempt {attempt}/{MAX_CONSECUTIVE_AUTO_REBOOTS})."
+            + (" This is the last automatic attempt." if attempt == MAX_CONSECUTIVE_AUTO_REBOOTS else ""),
             priority="high",
             tags="arrows_counterclockwise",
         )
 
 
-async def _reset_auto_recovery(pool, mac: str):
+async def _reset_auto_recovery(pool, role: str, mac: str):
     async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, consecutive_auto_reboots, auto_recovery_exhausted_alerted FROM devices WHERE mac = $1", mac,
+        )
+        if row is None or (row["consecutive_auto_reboots"] == 0 and not row["auto_recovery_exhausted_alerted"]):
+            return
+        prior_attempts = row["consecutive_auto_reboots"]
         await conn.execute(
-            "UPDATE devices SET consecutive_auto_reboots = 0 WHERE mac = $1 AND consecutive_auto_reboots != 0", mac,
+            "UPDATE devices SET consecutive_auto_reboots = 0, auto_recovery_exhausted_alerted = false WHERE id = $1",
+            row["id"],
+        )
+        await notify(
+            conn,
+            f"WiFi Optimizer: {role} radio recovered",
+            f"HaLow radio on {role} ({mac}) is back up after {prior_attempts} automatic reboot attempt(s).",
+            tags="white_check_mark",
         )
 
 
@@ -374,7 +403,7 @@ async def poll_telemetry(pool):
             if halow.get("radio_up") is False:
                 await _maybe_auto_recover_radio(pool, role, mac, host, port, user)
             elif halow.get("radio_up") is True:
-                await _reset_auto_recovery(pool, mac)
+                await _reset_auto_recovery(pool, role, mac)
 
 
 async def apply_pending_commands(pool):
