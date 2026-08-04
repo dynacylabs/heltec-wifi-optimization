@@ -158,22 +158,6 @@ verify_and_recover_radio() {
         sleep 2
         [ -x /morse/scripts/chipreset.sh ] && sh /morse/scripts/chipreset.sh 2>/dev/null
         sleep 3
-        # Confirmed live (2026-08-03): chipreset.sh's SDIO unbind/bind can
-        # trigger the kernel's own module auto-load before this script
-        # regains control, using the morse driver's compiled-in defaults -
-        # /etc/modules.d/morse (and any parameter overrides in it, e.g.
-        # the enable_auto_duty_cycle=N experiment tracking the AP's
-        # spontaneous ECSA channel-switch issue) is only consulted by
-        # kmodloader at actual system boot, not on a udev-triggered SDIO
-        # bind. Force an explicit reload here with modules.d's own
-        # per-device params (read fresh rather than duplicated here -
-        # bcf/macaddr_suffix differ between the AP and STA) so a
-        # mid-operation recovery cycle can't silently revert an override
-        # back to the compiled-in default.
-        rmmod morse dot11ah 2>/dev/null
-        morse_params="$(sed -n 's/^morse //p' /etc/modules.d/morse)"
-        # shellcheck disable=SC2086
-        modprobe morse $morse_params 2>/dev/null
         wifi up radio1 2>/dev/null
         sleep 8
         # Confirmed live (2026-08-01): a full netifd device-handler
