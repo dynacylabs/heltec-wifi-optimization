@@ -17,7 +17,25 @@ START=99
 CRON_MARKER="wifi-agent.sh recover-radio"
 CRON_LINE="*/15 * * * * /usr/bin/wifi-agent.sh recover-radio"
 
+# Explicit, persistent operator kill switch - added 2026-08-11. Before
+# this, disabling automation meant chmod-ing this whole init script
+# non-executable AND removing it from /etc/rc.d AND clearing the crontab
+# line by hand - three separate steps, and missing any one of them meant
+# the next reboot silently re-registered the cron line via start() below,
+# undoing a manual disable without any obvious sign it had happened. That
+# ambiguity cost real time during the 2026-08 incident. Now there's one
+# file to touch/remove and this script respects it consistently across
+# every boot:
+#   touch /etc/wifi-agent-disabled   # disable both the boot check and cron
+#   rm /etc/wifi-agent-disabled      # re-enable on the next boot
+DISABLE_MARKER="/etc/wifi-agent-disabled"
+
 start() {
+    if [ -e "$DISABLE_MARKER" ]; then
+        logger -t wifi-agent-boot "$DISABLE_MARKER present - skipping boot-time radio check and cron registration"
+        return 0
+    fi
+
     /usr/bin/wifi-agent.sh recover-radio
 
     crontab_file="/etc/crontabs/root"
