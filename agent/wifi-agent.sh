@@ -76,6 +76,47 @@ jnum() {
     [ -n "$1" ] && echo "$1" || echo null
 }
 
+# Mutex around anything that touches the radio module/interface state
+# (chip reset, `wifi down/up`, a full network reload) - added 2026-08-11
+# after review found nothing stopped the cron-driven recover-radio path
+# from running concurrently with a server-driven apply, or two retried
+# applies from overlapping if a reload hangs past the server's SSH
+# timeout. `mkdir` is used as the atomic primitive (not `flock`, which
+# isn't guaranteed present in every busybox build) - a directory create
+# either succeeds or fails atomically, no extra tooling required. Age is
+# tracked in a file inside the lock dir (rather than relying on `stat`/
+# `date -r`, whose flags vary across busybox builds) so a lock left behind
+# by a killed/crashed process doesn't wedge every future radio operation
+# forever.
+RADIO_LOCK_DIR="/tmp/wifi-agent-radio.lock"
+RADIO_LOCK_MAX_AGE_SECONDS=300
+
+acquire_radio_lock() {
+    attempt=0
+    while ! mkdir "$RADIO_LOCK_DIR" 2>/dev/null; do
+        lock_started="$(cat "$RADIO_LOCK_DIR/started_at" 2>/dev/null)"
+        now="$(date +%s)"
+        if [ -n "$lock_started" ] && [ $((now - lock_started)) -gt "$RADIO_LOCK_MAX_AGE_SECONDS" ]; then
+            logger -t wifi-agent "radio lock is >${RADIO_LOCK_MAX_AGE_SECONDS}s old - assuming its owner died without releasing it, reclaiming"
+            rm -rf "$RADIO_LOCK_DIR"
+            continue
+        fi
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge 30 ]; then
+            logger -t wifi-agent "could not acquire radio lock after 60s - another radio operation is in progress, aborting rather than risk interleaving with it"
+            return 1
+        fi
+        sleep 2
+    done
+    date +%s > "$RADIO_LOCK_DIR/started_at" 2>/dev/null
+    trap 'release_radio_lock' EXIT
+    return 0
+}
+
+release_radio_lock() {
+    rm -rf "$RADIO_LOCK_DIR" 2>/dev/null
+}
+
 halow_ifname() {
     ubus call network.wireless status 2>/dev/null | jsonfilter -e '@.radio1.interfaces[0].ifname' 2>/dev/null
 }
@@ -117,6 +158,15 @@ wifi24_ifname() {
 # solar/battery - doesn't strand the link on a channel the peer isn't
 # listening on.
 verify_and_recover_radio() {
+    # Serialize against any other radio-touching operation (a server-driven
+    # apply, or another overlapping invocation of this same function) -
+    # see acquire_radio_lock's comment. Bailing out here (rather than
+    # blocking indefinitely) is deliberate: if something else is already
+    # mid-operation, piling this on top of it is how today's corruption
+    # happened, not a risk worth taking to avoid skipping one 15-minute
+    # cron tick.
+    acquire_radio_lock || return 1
+
     # Survives across reboots (unlike /tmp, which is tmpfs) so the escalation
     # below can tell "first time trying a reboot" apart from "already tried
     # rebooting and it didn't help" - caps how many times this will reboot
@@ -305,6 +355,20 @@ cmd_collect() {
         "$MAC" "$DEVICE_HOSTNAME" "$halow_json" "$wifi24_json"
 }
 
+# Rejects anything that isn't a plausible-looking channel number before it
+# ever reaches `uci set` - added 2026-08-11. The server (halow_channel_plan.py)
+# is the real source of truth for which channels are valid, and this can't
+# duplicate that logic without the two drifting out of sync - but a bare
+# minimum sanity check (positive integer, sane upper bound) costs nothing
+# and means a malformed value from a future bug on the server side fails
+# loudly here instead of getting silently `uci set` onto the radio.
+is_plausible_channel() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$1" -ge 1 ] && [ "$1" -le 200 ]
+}
+
 apply_halow_operating_freq() {
     # $1 = JSON target_value, e.g. {"channel":44}
     # See header note: bandwidth is implied by the channel index itself,
@@ -319,6 +383,7 @@ apply_halow_operating_freq() {
     # minutes (well past the 120s timeout) with nothing reverting it.
     channel="$(echo "$1" | jsonfilter -e '@.channel' 2>/dev/null)"
     [ -z "$channel" ] && { echo "apply_halow_operating_freq: missing channel in $1" >&2; return 1; }
+    is_plausible_channel "$channel" || { echo "apply_halow_operating_freq: implausible channel value '$channel', refusing" >&2; return 1; }
     uci set wireless.radio1.channel="$channel"
 }
 
@@ -328,6 +393,7 @@ apply_wifi24_channel() {
     # apply_halow_operating_freq above.
     channel="$(echo "$1" | jsonfilter -e '@.channel' 2>/dev/null)"
     [ -z "$channel" ] && { echo "apply_wifi24_channel: missing channel in $1" >&2; return 1; }
+    is_plausible_channel "$channel" || { echo "apply_wifi24_channel: implausible channel value '$channel', refusing" >&2; return 1; }
     uci set wireless.radio0.channel="$channel"
 }
 
@@ -339,6 +405,12 @@ apply_wifi24_channel() {
 # on-device timer reverts it on its own regardless.
 cmd_apply() {
     param="$1"; target_value="$2"; ttl_seconds="${3:-120}"
+
+    # Serialize against recover-radio's chip-reset/reboot path and against
+    # a second overlapping apply (e.g. a retried SSH call while a prior
+    # reload is still running remotely) - see acquire_radio_lock's comment.
+    acquire_radio_lock || { echo "cmd_apply: could not acquire radio lock, another radio operation is in progress" >&2; exit 1; }
+
     case "$param" in
         halow_operating_freq) apply_halow_operating_freq "$target_value" || exit 1 ;;
         wifi24_channel) apply_wifi24_channel "$target_value" || exit 1 ;;
@@ -353,7 +425,25 @@ cmd_apply() {
     # of, and in addition to, the reload below. Only works because the
     # apply_*() functions above stage the change with plain `uci set` and
     # deliberately don't commit it themselves first.
-    ubus call uci apply "{\"rollback\":true,\"timeout\":$ttl_seconds}"
+    #
+    # CRITICAL, added 2026-08-11 after review: this call's exit status
+    # used to be completely ignored. Confirmed live (2026-08-03) that it
+    # can fail outright ("Invalid argument") while the staged `uci set`
+    # above is still sitting there uncommitted - if the script had barreled
+    # on into the reload below anyway (as it used to), the change would
+    # go live with *no* safety net at all: no rollback timer, nothing to
+    # revert it if the change is bad and the server can never reconnect to
+    # confirm it. That combination is the single biggest contributor to
+    # this session's damage. Now: if the safety net itself doesn't engage,
+    # the staged change is explicitly reverted and the whole apply is
+    # aborted before it ever touches the live radio - the server's own
+    # retry logic (apply_pending_commands) will try again next tick, by
+    # which point whatever made ubus/rpcd unhappy may have cleared.
+    if ! ubus call uci apply "{\"rollback\":true,\"timeout\":$ttl_seconds}"; then
+        echo "cmd_apply: 'uci apply --rollback' itself failed - no safety net available, reverting the staged change and aborting without touching the live radio" >&2
+        uci revert wireless
+        exit 1
+    fi
 
     if [ "$param" = "halow_operating_freq" ]; then
         # Confirmed live (2026-08-01): a plain `network.wireless reconf`
