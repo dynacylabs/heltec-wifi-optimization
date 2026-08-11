@@ -117,6 +117,47 @@ release_radio_lock() {
     rm -rf "$RADIO_LOCK_DIR" 2>/dev/null
 }
 
+# Unloads and reloads the morse kernel module with modules.d's own
+# per-device parameters, actually verifying each step rather than trusting
+# it - added 2026-08-11 after confirming live that the previous version
+# (bare `rmmod ... 2>/dev/null; modprobe ... 2>/dev/null`, neither checked)
+# could fail completely silently: if rmmod can't unload the module because
+# something still references it right after `wifi down` (the interface
+# not fully released yet), the modprobe that follows is a total no-op - a
+# kernel does not reload an already-loaded module's parameters just
+# because modprobe is invoked again. The result was the radio running
+# indefinitely on the chip's compiled-in defaults (country reverting to
+# its factory AU, macaddr_suffix and bcf blank) while every log line
+# upstream still claimed the reload had happened. Returns 1 if the
+# parameters demonstrably did not take, so the caller can tell a real
+# reload apart from one that silently no-opped.
+reload_morse_module() {
+    unload_attempt=1
+    while lsmod | grep -q '^morse '; do
+        if [ "$unload_attempt" -gt 3 ]; then
+            logger -t wifi-agent "reload_morse_module: morse module still loaded after 3 plain rmmod attempts - force-unloading"
+            rmmod -f morse dot11ah 2>/dev/null
+            break
+        fi
+        rmmod morse dot11ah 2>/dev/null
+        sleep 1
+        unload_attempt=$((unload_attempt + 1))
+    done
+
+    morse_params="$(sed -n 's/^morse //p' /etc/modules.d/morse)"
+    # shellcheck disable=SC2086
+    modprobe morse $morse_params 2>/dev/null
+    sleep 1
+
+    expected_country="$(echo "$morse_params" | sed -n 's/.*country=\([^ ]*\).*/\1/p')"
+    live_country="$(cat /sys/module/morse/parameters/country 2>/dev/null)"
+    if [ -n "$expected_country" ] && [ "$live_country" != "$expected_country" ]; then
+        logger -t wifi-agent "reload_morse_module: module loaded but country=${live_country:-unknown}, expected $expected_country - parameters did not take"
+        return 1
+    fi
+    return 0
+}
+
 halow_ifname() {
     ubus call network.wireless status 2>/dev/null | jsonfilter -e '@.radio1.interfaces[0].ifname' 2>/dev/null
 }
@@ -220,10 +261,24 @@ verify_and_recover_radio() {
         # bcf/macaddr_suffix differ between the AP and STA) so a
         # mid-operation recovery cycle can't silently revert an override
         # back to the compiled-in default.
-        rmmod morse dot11ah 2>/dev/null
-        morse_params="$(sed -n 's/^morse //p' /etc/modules.d/morse)"
-        # shellcheck disable=SC2086
-        modprobe morse $morse_params 2>/dev/null
+        #
+        # CRITICAL, added 2026-08-11 after review: confirmed live that
+        # this reload can fail *silently* and still leave the radio
+        # running on compiled-in defaults (country reverting to the
+        # chip's factory AU, macaddr_suffix and bcf blank) - the original
+        # version below neither checked rmmod's exit status nor verified
+        # modprobe's params actually took, so a busy module (still
+        # referenced right after `wifi down`, before it's actually
+        # released) made rmmod fail, which made the modprobe that
+        # followed it a complete no-op - a kernel won't reload an
+        # already-loaded module's parameters just because modprobe is
+        # called again. reload_morse_module() below verifies each step
+        # instead of trusting it.
+        if reload_morse_module; then
+            logger -t wifi-agent "reload_morse_module: module reloaded with modules.d parameters confirmed"
+        else
+            logger -t wifi-agent "reload_morse_module: parameters did not take (see prior log line) - continuing anyway, next attempt or the reboot escalation below may still recover it"
+        fi
         wifi up radio1 2>/dev/null
         sleep 8
         # Confirmed live (2026-08-01): a full netifd device-handler
