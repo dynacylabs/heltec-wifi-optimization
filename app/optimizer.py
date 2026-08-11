@@ -54,6 +54,16 @@ async def _has_pending_command(conn, device_id, param: str) -> bool:
     )
 
 
+# Below this many samples, an average over the window isn't trusted for a
+# decision - added 2026-08-11 code review. Without this, a device that
+# just reconnected after an outage (or was flapping for most of the
+# window) could have only one or two readings in an otherwise-empty
+# window, and a "sustained degradation over N minutes" classification
+# based on 1-2 noisy samples right after a reconnect isn't actually
+# evidence of sustained anything.
+MIN_SAMPLES_FOR_AVERAGE = 3
+
+
 async def _avg_over_window(conn, table: str, column: str, where_extra: str, device_id, minutes: int):
     since = datetime.now(timezone.utc) - timedelta(minutes=minutes)
     rows = await conn.fetch(
@@ -61,7 +71,9 @@ async def _avg_over_window(conn, table: str, column: str, where_extra: str, devi
         device_id, since,
     )
     values = [r["v"] for r in rows if r["v"] is not None]
-    return (sum(values) / len(values)) if values else None
+    if len(values) < MIN_SAMPLES_FOR_AVERAGE:
+        return None
+    return sum(values) / len(values)
 
 
 async def _in_cooldown(conn, device_id, param: str, cooldown_minutes: int) -> bool:
@@ -259,7 +271,7 @@ async def _throughput_utilization(conn, device_id, minutes: int):
         (r["throughput_mbps"], r["rate_mbps"]) for r in rows
         if r["throughput_mbps"] is not None and r["rate_mbps"] not in (None, 0)
     ]
-    if not pairs:
+    if len(pairs) < MIN_SAMPLES_FOR_AVERAGE:
         return None
     ratios = [t / r for t, r in pairs]
     return sum(ratios) / len(ratios)
