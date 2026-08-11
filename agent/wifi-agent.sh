@@ -158,6 +158,52 @@ reload_morse_module() {
     return 0
 }
 
+# True when the LIVE radio's country matches modules.d's configured value -
+# added 2026-08-11. Distinct from a plain channel mismatch: confirmed live
+# that a radio can present a completely different failure signature (its
+# own country reverted to the chip's factory default, alongside
+# channel=0/txpower=0) that a bare channel check misses, and - critically -
+# that this specific signature needs a *different* recovery strategy (see
+# verify_and_recover_radio's two branches below) than an ordinary channel
+# mismatch does.
+halow_country_matches() {
+    ifname="$1"
+    want="$(sed -n 's/.*country=\([^ ]*\).*/\1/p' /etc/modules.d/morse)"
+    [ -z "$want" ] && return 0
+    live="$(ubus call iwinfo info "{\"device\":\"$ifname\"}" 2>/dev/null | jsonfilter -e '@.country' 2>/dev/null)"
+    [ "$live" = "$want" ]
+}
+
+# Recovery path for the "corrupted defaults" failure signature (country/
+# txpower reverted to the chip's factory defaults, not just a wrong
+# channel) - see halow_country_matches and verify_and_recover_radio's
+# branch below for how this is detected. Deliberately does NOT attempt a
+# chip-reset first: tested live on 2026-08-11, chip-reset (even repeated,
+# even paired with reload_morse_module's verified parameter reload) never
+# cleared this signature - only a plain reboot did, and it took 3
+# consecutive plain reboots before the radio came up clean (1st: still
+# corrupted; 2nd: country/txpower fixed but channel drifted to the wrong
+# one; 3rd: fully clean). Capped at 4 (one more than what was empirically
+# needed) rather than higher, so a signature this doesn't actually fix
+# still gives up and waits for a human instead of reboot-looping forever.
+# Expects corruption_reboot_count_file to already be set by the caller.
+recover_from_corrupted_defaults() {
+    expected_channel="$1"
+    corruption_reboot_count="$(cat "$corruption_reboot_count_file" 2>/dev/null || echo 0)"
+    if [ "$corruption_reboot_count" -ge 4 ]; then
+        logger -t wifi-agent "HaLow radio still showing corrupted defaults (country mismatch) after $corruption_reboot_count plain-reboot attempts - giving up, manual intervention needed"
+        return 1
+    fi
+    echo "$((corruption_reboot_count + 1))" > "$corruption_reboot_count_file"
+    logger -t wifi-agent "HaLow radio showing corrupted defaults (country mismatch, expected channel $expected_channel) - rebooting (plain reboot attempt $((corruption_reboot_count + 1))/4, no chip-reset: proven ineffective for this signature)"
+    reboot
+    # reboot is asynchronous on OpenWrt (returns before the device actually
+    # goes down) - block here rather than falling through, which would log
+    # a misleading result while a reboot is already in flight.
+    sleep 60
+    return 1
+}
+
 halow_ifname() {
     ubus call network.wireless status 2>/dev/null | jsonfilter -e '@.radio1.interfaces[0].ifname' 2>/dev/null
 }
@@ -214,8 +260,11 @@ verify_and_recover_radio() {
     # the device on its own so a genuinely persistent hardware fault doesn't
     # turn into an infinite reboot loop. Cleared the moment the radio is
     # next confirmed healthy, by any invocation (boot or the periodic cron -
-    # see wifi-agent-boot.init).
+    # see wifi-agent-boot.init). Two separate counters/caps for two separate
+    # failure signatures - see the corrupted-defaults branch below for why
+    # they're not shared.
     reboot_count_file="/etc/wifi-agent-reboot-count"
+    corruption_reboot_count_file="/etc/wifi-agent-corruption-reboot-count"
 
     # At boot, radio1's interface may not have registered yet - wait for it
     # rather than silently skipping the check (confirmed live: skipping
@@ -239,10 +288,29 @@ verify_and_recover_radio() {
     attempt=1
     while [ "$attempt" -le 3 ]; do
         live_channel="$(ubus call iwinfo info "{\"device\":\"$ifname\"}" 2>/dev/null | jsonfilter -e '@.channel' 2>/dev/null)"
-        if [ "$live_channel" = "$expected_channel" ]; then
+        if [ "$live_channel" = "$expected_channel" ] && halow_country_matches "$ifname"; then
             logger -t wifi-agent "HaLow radio confirmed on configured channel $expected_channel"
-            rm -f "$reboot_count_file"
+            rm -f "$reboot_count_file" "$corruption_reboot_count_file"
             return 0
+        fi
+
+        # Confirmed live (2026-08-11): a mismatched *country* (not just a
+        # wrong channel) is a different failure signature entirely - the
+        # chip has fallen back to its own compiled-in factory defaults
+        # (country=AU, channel=0, txpower=0), not merely failed to reach the
+        # configured channel. The chip-reset loop below was tested against
+        # this exact signature ~6 times today (resets alone, and paired with
+        # reload_morse_module's verified parameter reload) and never cleared
+        # it once - only recover_from_corrupted_defaults's plain-reboot
+        # retries did. Branch out here before burning this loop's attempts
+        # on a strategy already proven not to work for it, rather than only
+        # checking it once up front - a reset itself could in principle
+        # induce the same symptom partway through, so this re-check runs
+        # every iteration.
+        if ! halow_country_matches "$ifname"; then
+            logger -t wifi-agent "HaLow radio country mismatch (corrupted-defaults signature) - skipping chip-reset, going straight to plain-reboot recovery"
+            recover_from_corrupted_defaults "$expected_channel"
+            return $?
         fi
         logger -t wifi-agent "HaLow radio on channel ${live_channel:-none}, expected $expected_channel (recovery attempt $attempt/3) - hard-resetting chip"
         wifi down radio1 2>/dev/null
@@ -299,14 +367,17 @@ verify_and_recover_radio() {
         attempt=$((attempt + 1))
     done
 
-    # Chip reset alone didn't recover it. Escalate to a full reboot -
-    # confirmed live (2026-08-01) to clear an SDIO-level probe timeout
-    # (`morse_sdio: probe of mmc0:0001:x failed with error -145`, i.e.
-    # ETIMEDOUT - the chip not responding on the bus at all) that 3
-    # chip-reset attempts alone did not clear. Capped at 2 auto-reboots
-    # across invocations so a genuinely persistent hardware fault doesn't
-    # reboot-loop the device forever - past that, give up and wait for a
-    # human instead.
+    # Chip reset alone didn't recover it, and every iteration above
+    # confirmed country still matched - so this is a plain channel-only
+    # mismatch, not the corrupted-defaults signature (that would already
+    # have returned via recover_from_corrupted_defaults above). Escalate to
+    # a full reboot - confirmed live (2026-08-01) to clear an SDIO-level
+    # probe timeout (`morse_sdio: probe of mmc0:0001:x failed with error
+    # -145`, i.e. ETIMEDOUT - the chip not responding on the bus at all)
+    # that 3 chip-reset attempts alone did not clear. Capped at 2
+    # auto-reboots across invocations so a genuinely persistent hardware
+    # fault doesn't reboot-loop the device forever - past that, give up and
+    # wait for a human instead.
     reboot_count="$(cat "$reboot_count_file" 2>/dev/null || echo 0)"
     if [ "$reboot_count" -ge 2 ]; then
         logger -t wifi-agent "HaLow radio FAILED to reach configured channel $expected_channel after 3 recovery attempts AND $reboot_count prior auto-reboots - giving up, manual intervention needed"
