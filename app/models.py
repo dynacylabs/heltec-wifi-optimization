@@ -41,6 +41,19 @@ class RadioTelemetryRaw(BaseModel):
     clients: list[RadioClientRaw] = []
 
 
+class DeviceEventRaw(BaseModel):
+    # Shape of one line in wifi-agent.sh's on-device event log, as
+    # embedded in collect's "events" array (see record_event/events_json
+    # in wifi-agent.sh, and main.py's _ingest_device_events). seq is the
+    # on-device monotonic counter that lets the server dedupe a line
+    # resent on a later poll instead of double-recording it.
+    seq: int
+    ts: int
+    type: str
+    message: str
+    details: Optional[dict] = None
+
+
 class CollectResult(BaseModel):
     # Shape of `wifi-agent.sh collect`'s stdout (see device_client.py) -
     # device_mac/hostname only, no `role`: the server already knows which
@@ -50,6 +63,7 @@ class CollectResult(BaseModel):
     device_mac: str
     hostname: Optional[str] = None
     radios: list[RadioTelemetryRaw]
+    events: list[DeviceEventRaw] = []
 
 
 class RadioSnapshot(BaseModel):
@@ -142,6 +156,17 @@ class OptimizerSettings(BaseModel):
     halow_channel_cycling_enabled: bool
     halow_bandwidth_changes_enabled: bool
     wifi24_channel_cycling_enabled: bool
+
+
+class DeviceEventEntry(BaseModel):
+    id: int
+    device_mac: str
+    device_role: Literal["AP", "STA"]
+    occurred_at: datetime
+    source: Literal["server", "device"]
+    event_type: str
+    message: str
+    details: Optional[dict] = None
 
 
 class BackupHistoryEntry(BaseModel):

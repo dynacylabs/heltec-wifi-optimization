@@ -76,6 +76,55 @@ jnum() {
     [ -n "$1" ] && echo "$1" || echo null
 }
 
+# Local append-only event log for anything this script or its recovery
+# logic does on its own, independent of whether the server happens to be
+# watching at that exact moment (chip-reset attempts, corrupted-defaults
+# detection, on-device reboots) - added 2026-08-11 so these show up on the
+# dashboard's event log instead of only ever being visible via `logread`
+# on the device itself, gone the moment its ring buffer wraps. Read (and
+# defensively trimmed, not cleared) by cmd_collect on every poll - the
+# server dedupes by (device_id, seq) via device_events' unique index, so
+# resending already-seen lines every ~30s is harmless, not something this
+# needs to track itself.
+EVENT_LOG="/etc/wifi-agent-events.jsonl"
+EVENT_SEQ_FILE="/etc/wifi-agent-event-seq"
+EVENT_LOG_MAX_LINES=50
+
+record_event() {
+    event_type="$1"
+    message="$2"
+    details="${3:-null}"
+    seq="$(cat "$EVENT_SEQ_FILE" 2>/dev/null || echo 0)"
+    seq=$((seq + 1))
+    echo "$seq" > "$EVENT_SEQ_FILE"
+    ts="$(date +%s)"
+    escaped_message="$(printf '%s' "$message" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+    printf '{"seq":%s,"ts":%s,"type":"%s","message":"%s","details":%s}\n' \
+        "$seq" "$ts" "$event_type" "$escaped_message" "$details" >> "$EVENT_LOG"
+    # Bound growth defensively - events are rare (recovery actions only,
+    # never a routine healthy check), so this should almost never actually
+    # trim anything in practice.
+    if [ "$(wc -l < "$EVENT_LOG" 2>/dev/null || echo 0)" -gt "$EVENT_LOG_MAX_LINES" ]; then
+        tail -n "$EVENT_LOG_MAX_LINES" "$EVENT_LOG" > "$EVENT_LOG.tmp" 2>/dev/null && mv "$EVENT_LOG.tmp" "$EVENT_LOG"
+    fi
+}
+
+# Renders the event log as a JSON array for cmd_collect - each line is
+# already a self-contained JSON object (built by record_event above), so
+# this just joins them rather than parsing/re-serializing.
+events_json() {
+    [ -s "$EVENT_LOG" ] || { echo "[]"; return; }
+    printf '['
+    first=1
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        [ "$first" -eq 0 ] && printf ','
+        printf '%s' "$line"
+        first=0
+    done < "$EVENT_LOG"
+    printf ']'
+}
+
 # Mutex around anything that touches the radio module/interface state
 # (chip reset, `wifi down/up`, a full network reload) - added 2026-08-11
 # after review found nothing stopped the cron-driven recover-radio path
@@ -192,10 +241,14 @@ recover_from_corrupted_defaults() {
     corruption_reboot_count="$(cat "$corruption_reboot_count_file" 2>/dev/null || echo 0)"
     if [ "$corruption_reboot_count" -ge 4 ]; then
         logger -t wifi-agent "HaLow radio still showing corrupted defaults (country mismatch) after $corruption_reboot_count plain-reboot attempts - giving up, manual intervention needed"
+        record_event "on_device_recovery_exhausted" "Corrupted defaults persisted after $corruption_reboot_count plain-reboot attempts - manual intervention needed" \
+            "{\"path\":\"corrupted_defaults\",\"attempts\":$corruption_reboot_count}"
         return 1
     fi
     echo "$((corruption_reboot_count + 1))" > "$corruption_reboot_count_file"
     logger -t wifi-agent "HaLow radio showing corrupted defaults (country mismatch, expected channel $expected_channel) - rebooting (plain reboot attempt $((corruption_reboot_count + 1))/4, no chip-reset: proven ineffective for this signature)"
+    record_event "on_device_reboot" "Corrupted defaults (country mismatch) - plain reboot attempt $((corruption_reboot_count + 1))/4, no chip-reset" \
+        "{\"path\":\"corrupted_defaults\",\"attempt\":$((corruption_reboot_count + 1)),\"max_attempts\":4,\"expected_channel\":$expected_channel}"
     reboot
     # reboot is asynchronous on OpenWrt (returns before the device actually
     # goes down) - block here rather than falling through, which would log
@@ -282,6 +335,13 @@ verify_and_recover_radio() {
     # they're not shared.
     reboot_count_file="/etc/wifi-agent-reboot-count"
     corruption_reboot_count_file="/etc/wifi-agent-corruption-reboot-count"
+    # Captured before any recovery action below, purely so the healthy
+    # return path can tell "this invocation found everything fine, same as
+    # most of the 15-minute checks" apart from "this invocation is the one
+    # where a prior escalation's reboot(s) actually paid off" - only the
+    # latter is interesting enough to log as a recovery event.
+    reboot_count_before="$(cat "$reboot_count_file" 2>/dev/null || echo 0)"
+    corruption_reboot_count_before="$(cat "$corruption_reboot_count_file" 2>/dev/null || echo 0)"
 
     # At boot, radio1's interface may not have registered yet - wait for it
     # rather than silently skipping the check (confirmed live: skipping
@@ -302,13 +362,24 @@ verify_and_recover_radio() {
     expected_channel="$(uci get wireless.radio1.channel 2>/dev/null)"
     [ -z "$expected_channel" ] && { echo "verify_and_recover_radio: no configured channel in uci, skipping" >&2; return 1; }
 
+    detected_logged=0
     attempt=1
     while [ "$attempt" -le 3 ]; do
         live_channel="$(ubus call iwinfo info "{\"device\":\"$ifname\"}" 2>/dev/null | jsonfilter -e '@.channel' 2>/dev/null)"
         if [ "$live_channel" = "$expected_channel" ] && halow_country_matches "$ifname"; then
             logger -t wifi-agent "HaLow radio confirmed on configured channel $expected_channel"
+            if [ "$reboot_count_before" != "0" ] || [ "$corruption_reboot_count_before" != "0" ]; then
+                record_event "radio_recovered" "HaLow radio back on channel $expected_channel after prior recovery attempts (reboots: $reboot_count_before, corrupted-defaults reboots: $corruption_reboot_count_before)"
+            fi
             rm -f "$reboot_count_file" "$corruption_reboot_count_file"
             return 0
+        fi
+
+        if [ "$detected_logged" -eq 0 ]; then
+            live_country="$(ubus call iwinfo info "{\"device\":\"$ifname\"}" 2>/dev/null | jsonfilter -e '@.country' 2>/dev/null)"
+            record_event "radio_unhealthy_detected" \
+                "HaLow radio unhealthy: channel=${live_channel:-none} (expected $expected_channel), country=${live_country:-none}"
+            detected_logged=1
         fi
 
         # Confirmed live (2026-08-11): a mismatched *country* (not just a
@@ -326,10 +397,13 @@ verify_and_recover_radio() {
         # every iteration.
         if ! halow_country_matches "$ifname"; then
             logger -t wifi-agent "HaLow radio country mismatch (corrupted-defaults signature) - skipping chip-reset, going straight to plain-reboot recovery"
+            record_event "corrupted_defaults_detected" "Country mismatch detected - chip appears to have reverted to compiled-in factory defaults"
             recover_from_corrupted_defaults "$expected_channel"
             return $?
         fi
         logger -t wifi-agent "HaLow radio on channel ${live_channel:-none}, expected $expected_channel (recovery attempt $attempt/3) - hard-resetting chip"
+        record_event "chip_reset_attempted" "Channel mismatch (live=${live_channel:-none}, expected $expected_channel) - chip-reset attempt $attempt/3" \
+            "{\"attempt\":$attempt,\"live_channel\":$(jnum "$live_channel"),\"expected_channel\":$expected_channel}"
         wifi down radio1 2>/dev/null
         sleep 2
         [ -x /morse/scripts/chipreset.sh ] && sh /morse/scripts/chipreset.sh 2>/dev/null
@@ -398,10 +472,14 @@ verify_and_recover_radio() {
     reboot_count="$(cat "$reboot_count_file" 2>/dev/null || echo 0)"
     if [ "$reboot_count" -ge 2 ]; then
         logger -t wifi-agent "HaLow radio FAILED to reach configured channel $expected_channel after 3 recovery attempts AND $reboot_count prior auto-reboots - giving up, manual intervention needed"
+        record_event "on_device_recovery_exhausted" "Channel mismatch persisted after 3 chip-reset attempts and $reboot_count prior reboots - manual intervention needed" \
+            "{\"path\":\"channel_mismatch\",\"attempts\":$reboot_count,\"expected_channel\":$expected_channel}"
         return 1
     fi
     echo "$((reboot_count + 1))" > "$reboot_count_file"
     logger -t wifi-agent "HaLow radio still not on channel $expected_channel after 3 chip-reset attempts (prior auto-reboots: $reboot_count) - rebooting as a last resort"
+    record_event "on_device_reboot" "Channel mismatch persisted after 3 chip-reset attempts - reboot attempt $((reboot_count + 1))/2" \
+        "{\"path\":\"channel_mismatch\",\"attempt\":$((reboot_count + 1)),\"max_attempts\":2,\"expected_channel\":$expected_channel}"
     reboot
     # reboot is asynchronous on OpenWrt (returns before the device actually
     # goes down) - block here rather than falling through, which would log
@@ -494,8 +572,9 @@ collect_wifi24() {
 cmd_collect() {
     halow_json="$(collect_halow)"
     wifi24_json="$(collect_wifi24)"
-    printf '{"device_mac":"%s","hostname":"%s","radios":[%s,%s]}\n' \
-        "$MAC" "$DEVICE_HOSTNAME" "$halow_json" "$wifi24_json"
+    events="$(events_json)"
+    printf '{"device_mac":"%s","hostname":"%s","radios":[%s,%s],"events":%s}\n' \
+        "$MAC" "$DEVICE_HOSTNAME" "$halow_json" "$wifi24_json" "$events"
 }
 
 # Rejects anything that isn't a plausible-looking channel number before it

@@ -13,12 +13,14 @@ import device_client
 import ssh_client
 from config import API_TOKEN, DEFAULT_COMMAND_TTL_SECONDS, SSH_KEY_PATH
 from db import close_pool, ensure_retention_policies, get_pool
+from events import record_event
 from models import (
     AppSettings,
     AppSettingsUpdate,
     BackupHistoryEntry,
     CollectResult,
     CommandHistoryEntry,
+    DeviceEventEntry,
     DeviceStatus,
     DeviceTarget,
     DeviceTargetUpdate,
@@ -136,6 +138,7 @@ async def _get_or_create_device(pool, mac: str, role: str | None, hostname: str 
                     "Telemetry resumed after an outage.",
                     tags="white_check_mark",
                 )
+                await record_event(conn, row["id"], "server", "device_online", "Telemetry resumed after an outage")
             return row["id"]
         if role is None:
             raise HTTPException(400, "unknown device and no role provided to register it")
@@ -170,12 +173,16 @@ async def check_device_liveness(pool):
                 priority="high",
                 tags="warning",
             )
+            await record_event(
+                conn, d["id"], "server", "device_offline",
+                f"No telemetry received in over {offline_alert_seconds}s",
+            )
 
 
-async def _notify_command_outcome(conn, command_id: int, title_suffix: str, reason: str | None, tags: str):
+async def _notify_command_outcome(conn, command_id: int, title_suffix: str, event_type: str, reason: str | None, tags: str):
     info = await conn.fetchrow(
         """
-        SELECT d.mac, d.role, c.param, c.target_value FROM commands c
+        SELECT d.id AS device_id, d.mac, d.role, c.param, c.target_value FROM commands c
         JOIN devices d ON d.id = c.device_id WHERE c.id = $1
         """,
         command_id,
@@ -188,14 +195,18 @@ async def _notify_command_outcome(conn, command_id: int, title_suffix: str, reas
             priority="high",
             tags=tags,
         )
+        await record_event(
+            conn, info["device_id"], "server", event_type,
+            f"Command {info['param']} -> {info['target_value']} {title_suffix}: {reason or 'no reason given'}",
+        )
 
 
 async def _notify_reverted(conn, command_id: int, reason: str | None):
-    await _notify_command_outcome(conn, command_id, "reverted", reason, "rotating_light")
+    await _notify_command_outcome(conn, command_id, "reverted", "command_reverted", reason, "rotating_light")
 
 
 async def _notify_unknown(conn, command_id: int, reason: str | None):
-    await _notify_command_outcome(conn, command_id, "outcome unknown", reason, "grey_question")
+    await _notify_command_outcome(conn, command_id, "outcome unknown", "command_outcome_unknown", reason, "grey_question")
 
 
 async def _upsert_radio_counters(conn, device_id, radio: str, retries_cum, packets_cum, tx_bytes_cum, rx_bytes_cum, now):
@@ -255,6 +266,69 @@ async def _upsert_client_counters(conn, device_id, radio: str, client_mac: str, 
     return (d_retries / d_packets) if (d_retries >= 0 and d_packets > 0) else 0.0
 
 
+CHANNEL_PARAM_BY_RADIO = {"halow": "halow_operating_freq", "wifi24": "wifi24_channel"}
+
+# How far back to look for a matching applied/acked command before calling
+# an observed channel change "commanded" rather than "uncommanded" - wide
+# enough to comfortably cover a normal apply + verify-confirm round trip
+# (default command_verify_delay_seconds is well under this), narrow enough
+# that a channel that happens to cycle back to an old target hours later
+# on its own (e.g. ECSA) doesn't get misattributed to a stale command.
+CHANNEL_CHANGE_COMMAND_LOOKBACK_MINUTES = 10
+
+
+async def _record_channel_change_if_any(conn, device_id, radio: str, new_channel: int | None, now):
+    if new_channel is None:
+        return
+    param = CHANNEL_PARAM_BY_RADIO.get(radio)
+    if param is None:
+        return
+    prev_channel = await conn.fetchval(
+        "SELECT channel FROM telemetry WHERE device_id = $1 AND radio = $2 ORDER BY time DESC LIMIT 1",
+        device_id, radio,
+    )
+    if prev_channel is None or prev_channel == new_channel:
+        return
+    # "Commanded" here means "a command we issued for this exact target
+    # recently made it to applied/acked" - not proof this specific change
+    # caused it (that would need per-command SSH provenance this codebase
+    # doesn't have), but a close enough signal to label the common cases:
+    # an optimizer/manual change shows one, an unprompted drift (e.g. the
+    # Morse chip's own ECSA behavior) shows none.
+    commanded = await conn.fetchval(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM commands
+            WHERE device_id = $1 AND param = $2 AND status IN ('applied', 'acked')
+              AND (target_value->>'channel')::int = $3
+              AND applied_at > $4 - make_interval(mins => $5)
+        )
+        """,
+        device_id, param, new_channel, now, CHANNEL_CHANGE_COMMAND_LOOKBACK_MINUTES,
+    )
+    await record_event(
+        conn, device_id, "server", "channel_changed",
+        f"{radio} channel changed {prev_channel} -> {new_channel}"
+        + ("" if commanded else " (no matching recent command - uncommanded)"),
+        {"radio": radio, "from": prev_channel, "to": new_channel, "commanded": bool(commanded)},
+    )
+
+
+async def _ingest_device_events(conn, device_id, events: list) -> None:
+    # Ingests wifi-agent.sh's own on-device event log (chip-reset
+    # attempts, corrupted-defaults detection, on-device reboots) - the
+    # things the server has no other way of ever seeing, since they can
+    # happen entirely between polls, driven by the on-device cron, with
+    # nothing prompting the device to call out to the server about it.
+    # record_event's ON CONFLICT DO NOTHING on (device_id, device_seq)
+    # makes resending the same lines on every poll harmless.
+    for e in events:
+        await record_event(
+            conn, device_id, "device", e.type, e.message, e.details,
+            device_seq=e.seq, occurred_at=datetime.fromtimestamp(e.ts, tz=timezone.utc),
+        )
+
+
 async def _ingest_collect(pool, role: str, raw: dict):
     result = CollectResult.model_validate(raw)
     device_id = await _get_or_create_device(pool, result.device_mac, role, result.hostname)
@@ -262,6 +336,7 @@ async def _ingest_collect(pool, role: str, raw: dict):
     async with pool.acquire() as conn:
         async with conn.transaction():
             for radio in result.radios:
+                await _record_channel_change_if_any(conn, device_id, radio.radio, radio.channel, now)
                 retries_rate, throughput_mbps = await _upsert_radio_counters(
                     conn, device_id, radio.radio, radio.retries_cum, radio.packets_cum,
                     radio.tx_bytes_cum, radio.rx_bytes_cum, now,
@@ -285,6 +360,7 @@ async def _ingest_collect(pool, role: str, raw: dict):
                         """,
                         now, device_id, radio.radio, client.mac, None, client.rssi, client.rate_mbps, client_retries,
                     )
+            await _ingest_device_events(conn, device_id, result.events)
 
 
 async def _get_device_targets(pool) -> dict[str, tuple[str, int, str]]:
@@ -362,6 +438,11 @@ async def _maybe_auto_recover_radio(pool, role: str, mac: str, host: str, port: 
                     priority="high",
                     tags="rotating_light",
                 )
+                await record_event(
+                    conn, device["id"], "server", "auto_recovery_exhausted",
+                    f"Radio still down after {MAX_CONSECUTIVE_AUTO_REBOOTS} automatic reboot attempts - "
+                    "manual intervention needed",
+                )
             return
         try:
             await device_client.reboot(host, port, user, SSH_KEY_PATH)
@@ -380,6 +461,12 @@ async def _maybe_auto_recover_radio(pool, role: str, mac: str, host: str, port: 
             + (" This is the last automatic attempt." if attempt == MAX_CONSECUTIVE_AUTO_REBOOTS else ""),
             priority="high",
             tags="arrows_counterclockwise",
+        )
+        await record_event(
+            conn, device["id"], "server", "auto_recovery_reboot",
+            f"HaLow radio reported down for {down_polls} consecutive polls - server issuing automatic reboot "
+            f"(attempt {attempt}/{MAX_CONSECUTIVE_AUTO_REBOOTS})",
+            {"attempt": attempt, "max_attempts": MAX_CONSECUTIVE_AUTO_REBOOTS, "consecutive_down_polls": down_polls},
         )
 
 
@@ -413,6 +500,10 @@ async def _reset_auto_recovery(pool, role: str, mac: str):
             f"WiFi Optimizer: {role} radio recovered",
             f"HaLow radio on {role} ({mac}) is back up after {prior_attempts} automatic reboot attempt(s).",
             tags="white_check_mark",
+        )
+        await record_event(
+            conn, row["id"], "server", "radio_recovered",
+            f"HaLow radio back up after {prior_attempts} automatic reboot attempt(s)",
         )
 
 
@@ -504,7 +595,7 @@ async def check_in_flight_commands(pool):
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT c.id, c.param, c.target_value, c.ttl_seconds, c.applied_at, d.mac, d.role
+            SELECT c.id, c.param, c.target_value, c.ttl_seconds, c.applied_at, d.id AS device_id, d.mac, d.role
             FROM commands c JOIN devices d ON d.id = c.device_id
             WHERE c.status = 'applied'
             """
@@ -536,6 +627,10 @@ async def check_in_flight_commands(pool):
         async with pool.acquire() as conn:
             if confirmed is True:
                 await conn.execute("UPDATE commands SET status = 'acked', acked_at = now() WHERE id = $1", c["id"])
+                await record_event(
+                    conn, c["device_id"], "server", "command_confirmed",
+                    f"Command {c['param']} -> {c['target_value']} confirmed on device",
+                )
             elif confirmed is False:
                 reason = "target value not reached after apply"
                 await conn.execute("UPDATE commands SET status = 'reverted', reason = $2 WHERE id = $1", c["id"], reason)
@@ -775,6 +870,22 @@ async def get_command_history(limit: int = Query(default=50, gt=0, le=500)):
         return [CommandHistoryEntry(**dict(r)) for r in rows]
 
 
+@app.get("/api/events", response_model=list[DeviceEventEntry], dependencies=[Depends(require_token)])
+async def get_events(limit: int = Query(default=200, gt=0, le=1000)):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT e.id, d.mac AS device_mac, d.role AS device_role, e.occurred_at,
+                   e.source, e.event_type, e.message, e.details
+            FROM device_events e JOIN devices d ON d.id = e.device_id
+            ORDER BY e.occurred_at DESC LIMIT $1
+            """,
+            limit,
+        )
+        return [DeviceEventEntry(**dict(r)) for r in rows]
+
+
 @app.get("/api/optimizer", response_model=OptimizerState, dependencies=[Depends(require_token)])
 async def get_optimizer_state():
     pool = await get_pool()
@@ -812,6 +923,7 @@ async def reboot_device(device_mac: str):
             "INSERT INTO commands (device_id, param, target_value, ttl_seconds) VALUES ($1, 'reboot', '{}'::jsonb, $2)",
             device["id"], DEFAULT_COMMAND_TTL_SECONDS["reboot"],
         )
+        await record_event(conn, device["id"], "server", "manual_reboot_requested", "Reboot queued from the dashboard")
     logger.warning("Reboot command queued for %s (%s) via dashboard", device_mac, device["role"])
 
 
@@ -997,7 +1109,7 @@ async def restore_backup(backup_id: int):
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT b.archive, d.role FROM device_backups b
+            SELECT b.archive, d.id AS device_id, d.role FROM device_backups b
             JOIN devices d ON d.id = b.device_id WHERE b.id = $1
             """,
             backup_id,
@@ -1016,6 +1128,8 @@ async def restore_backup(backup_id: int):
     except Exception as exc:
         raise HTTPException(502, f"restore failed: {exc}")
     logger.warning("Backup %d restored to %s (%s)", backup_id, row["role"], target["ssh_host"])
+    async with pool.acquire() as conn:
+        await record_event(conn, row["device_id"], "server", "backup_restored", f"Config backup #{backup_id} restored from the dashboard")
     return {"status": "ok"}
 
 
@@ -1097,6 +1211,13 @@ async def provision_device(role: str, request: Request):
             """,
             role,
         )
+        # Best-effort only: a genuinely brand-new device has no devices
+        # row yet (that's created lazily on its first telemetry poll, see
+        # _get_or_create_device) - re-provisioning existing hardware,
+        # the far more common case, does have one to attach this to.
+        existing_device_id = await conn.fetchval("SELECT id FROM devices WHERE role = $1", role)
+        if existing_device_id is not None:
+            await record_event(conn, existing_device_id, "server", "device_provisioned", "Device (re-)provisioned from the dashboard")
     logger.warning("Device %s provisioned via dashboard (%s)", role, target["ssh_host"])
     return {"status": "ok"}
 

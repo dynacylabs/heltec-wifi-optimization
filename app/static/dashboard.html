@@ -243,6 +243,10 @@
   <h2>Command History</h2>
   <div class="table-scroll" id="command-history"></div>
 
+  <h2>Activity Log</h2>
+  <div class="chart-help">Every reboot (and why), every channel change (commanded by the optimizer/dashboard, or uncommanded - e.g. the HaLow chip's own ECSA behavior), and on-device recovery actions (chip-reset attempts, corrupted-defaults detection) reported straight from the device's own event log. "Device"-sourced rows are things wifi-agent.sh did on its own between polls; "Server"-sourced rows are things this app decided or observed.</div>
+  <div class="table-scroll" id="event-log"></div>
+
   </div>
   <!-- ==================== Settings view ==================== -->
   <div id="view-settings" class="view hidden">
@@ -584,6 +588,7 @@ function showApp() {
   loadAppSettings();
   setInterval(refreshStatus, 15000);
   setInterval(refreshCommands, 15000);
+  setInterval(refreshEvents, 15000);
   setInterval(refreshBackups, 60000);
   setInterval(refreshCharts, 30000);
   setInterval(refreshOptimizerState, 15000);
@@ -860,6 +865,50 @@ async function refreshCommands() {
   `;
 }
 
+// Reuses the command-status badge CSS classes (defined for
+// pending/applied/acked/reverted/expired) to color-code event types by
+// rough severity/intent, rather than adding a parallel set of classes -
+// red for reboots/exhausted/offline (things that cost downtime or need a
+// human), green for recovered/online/confirmed (good news), blue for
+// channel changes and optimizer decisions, muted for everything else
+// (detection/attempt logging, provisioning, backups).
+function eventBadgeClass(eventType) {
+  if (eventType.includes("reboot") || eventType.includes("exhausted") || eventType === "device_offline" || eventType === "command_reverted") return "reverted";
+  if (eventType.includes("recovered") || eventType === "device_online" || eventType === "command_confirmed") return "acked";
+  if (eventType === "channel_changed" || eventType === "optimizer_command_issued") return "applied";
+  return "pending";
+}
+
+function eventTypeBadge(eventType) {
+  return `<span class="badge ${eventBadgeClass(eventType)}">${eventType}</span>`;
+}
+
+async function refreshEvents() {
+  const resp = await api("/api/events?limit=200");
+  if (!resp.ok) return;
+  const events = await resp.json();
+  const container = document.getElementById("event-log");
+  if (events.length === 0) {
+    container.innerHTML = '<div class="empty">No events recorded yet.</div>';
+    return;
+  }
+  const rows = events.map(e => `
+    <tr>
+      <td data-label="Time">${new Date(e.occurred_at).toLocaleString()}</td>
+      <td data-label="Device">${e.device_role}</td>
+      <td data-label="Source">${e.source}</td>
+      <td data-label="Type">${eventTypeBadge(e.event_type)}</td>
+      <td data-label="Message">${e.message}</td>
+    </tr>
+  `).join("");
+  container.innerHTML = `
+    <table>
+      <thead><tr><th>Time</th><th>Device</th><th>Source</th><th>Type</th><th>Message</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
 function formatBytes(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -1016,6 +1065,7 @@ function refreshAll() {
   refreshStatus();
   refreshCharts();
   refreshCommands();
+  refreshEvents();
   refreshBackups();
   refreshDeviceTargets();
 }

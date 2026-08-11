@@ -5,6 +5,7 @@ import asyncpg
 
 import halow_channel_plan
 from config import DEFAULT_COMMAND_TTL_SECONDS, WIFI24_CHANNELS
+from events import record_event
 from notify import notify
 
 logger = logging.getLogger("wifi_optimizer.optimizer")
@@ -115,6 +116,11 @@ async def _emit_halow_command(conn, device_id, mac, channel: int, bandwidth_mhz:
     logger.warning(
         "HaLow AP %s: %s - channel %s (%sMHz) -> %s (%sMHz)",
         mac, reason, current_channel, current_bw, channel, bandwidth_mhz,
+    )
+    await record_event(
+        conn, device_id, "server", "optimizer_command_issued",
+        f"HaLow: {reason} - commanding channel {current_channel} ({current_bw}MHz) -> {channel} ({bandwidth_mhz}MHz)",
+        {"from_channel": current_channel, "to_channel": channel, "from_bw_mhz": current_bw, "to_bw_mhz": bandwidth_mhz},
     )
 
 
@@ -356,4 +362,10 @@ async def _evaluate_wifi24_link(pool: asyncpg.Pool, settings):
             f"STA {sta['mac']}: sustained avg client retries {avg_retries:.1%} over {sustain_minutes}m - "
             f"cycling channel {current_channel} -> {next_channel}",
             priority="high", tags="warning",
+        )
+        await record_event(
+            conn, sta["id"], "server", "optimizer_command_issued",
+            f"2.4GHz: degraded (avg retries={avg_retries:.1%} over {sustain_minutes}m) - "
+            f"commanding channel {current_channel} -> {next_channel}",
+            {"from_channel": current_channel, "to_channel": next_channel, "avg_retries": avg_retries},
         )
