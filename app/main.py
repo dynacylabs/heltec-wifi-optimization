@@ -299,6 +299,17 @@ async def _get_device_targets(pool) -> dict[str, tuple[str, int, str]]:
 
 AUTO_REBOOT_COOLDOWN_SECONDS = 15 * 60
 MAX_CONSECUTIVE_AUTO_REBOOTS = 3
+# A device must report radio_up=False this many consecutive polls before
+# the watchdog reboots it - added 2026-08-11 code review, after directly
+# observing the STA's radio flap (drop and recover within seconds) on a
+# marginal RF link. Reacting to a single bad poll means occasionally
+# rebooting a device that was already on its way back up on its own - a
+# reboot is disruptive enough (1-3 minutes down) that this is a real cost,
+# not a free extra safety margin. At the default 30s poll interval this
+# adds up to ~1 minute of confirmation before acting, which is negligible
+# next to a chip that's genuinely wedged (stays down indefinitely) but
+# meaningfully filters out multi-second flicker.
+MIN_CONSECUTIVE_DOWN_POLLS_BEFORE_REBOOT = 3
 
 
 async def _maybe_auto_recover_radio(pool, role: str, mac: str, host: str, port: int, user: str):
@@ -312,11 +323,21 @@ async def _maybe_auto_recover_radio(pool, role: str, mac: str, host: str, port: 
     # wedged and nothing was watching for that between boots.
     async with pool.acquire() as conn:
         device = await conn.fetchrow(
-            "SELECT id, last_auto_reboot_at, consecutive_auto_reboots, auto_recovery_exhausted_alerted "
-            "FROM devices WHERE mac = $1",
+            "SELECT id, last_auto_reboot_at, consecutive_auto_reboots, auto_recovery_exhausted_alerted, "
+            "consecutive_radio_down_polls FROM devices WHERE mac = $1",
             mac,
         )
         if device is None:
+            return
+        down_polls = device["consecutive_radio_down_polls"] + 1
+        await conn.execute(
+            "UPDATE devices SET consecutive_radio_down_polls = $2 WHERE id = $1", device["id"], down_polls,
+        )
+        if down_polls < MIN_CONSECUTIVE_DOWN_POLLS_BEFORE_REBOOT:
+            logger.info(
+                "%s radio_up=False (%d/%d consecutive polls) - not yet acting, could still be transient",
+                role, down_polls, MIN_CONSECUTIVE_DOWN_POLLS_BEFORE_REBOOT,
+            )
             return
         if device["last_auto_reboot_at"] is not None:
             elapsed = (datetime.now(timezone.utc) - device["last_auto_reboot_at"]).total_seconds()
@@ -365,9 +386,22 @@ async def _maybe_auto_recover_radio(pool, role: str, mac: str, host: str, port: 
 async def _reset_auto_recovery(pool, role: str, mac: str):
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, consecutive_auto_reboots, auto_recovery_exhausted_alerted FROM devices WHERE mac = $1", mac,
+            "SELECT id, consecutive_auto_reboots, auto_recovery_exhausted_alerted, consecutive_radio_down_polls "
+            "FROM devices WHERE mac = $1",
+            mac,
         )
-        if row is None or (row["consecutive_auto_reboots"] == 0 and not row["auto_recovery_exhausted_alerted"]):
+        if row is None:
+            return
+        # Always clear the down-poll streak on a healthy reading, even if
+        # there's nothing else to reset below - otherwise a device that
+        # flaps just under the reboot threshold (e.g. down 2 polls, up 1,
+        # down 2 more) would keep accumulating across the healthy blips
+        # instead of the streak actually meaning "consecutive".
+        if row["consecutive_radio_down_polls"] != 0:
+            await conn.execute(
+                "UPDATE devices SET consecutive_radio_down_polls = 0 WHERE id = $1", row["id"],
+            )
+        if row["consecutive_auto_reboots"] == 0 and not row["auto_recovery_exhausted_alerted"]:
             return
         prior_attempts = row["consecutive_auto_reboots"]
         await conn.execute(
