@@ -36,6 +36,27 @@ start() {
         return 0
     fi
 
+    # Confirmed live via dmesg (2026-08-11): on this hardware, the HaLow
+    # radio's own normal cold-boot sequence (module load -> bridge/wlan0
+    # bring-up -> hostapd actually negotiating the configured channel)
+    # takes on the order of ~110s. Running the health check before that
+    # settles was catching the radio mid-startup with a channel reading
+    # that hadn't landed yet, reading as a false "mismatch" - which then
+    # fired an unnecessary chip-reset. dmesg showed hostapd print its
+    # startup banner confirming the *correct* config, immediately
+    # followed (within ~2s) by "Resetting Morse Chip" - i.e. this
+    # boot-time check reset a radio that was already fine, and that
+    # chip-reset's own post-reset auto-reload is what re-introduced the
+    # separate compiled-in-defaults corruption bug (see
+    # reload_morse_module/halow_country_matches in wifi-agent.sh) on a
+    # device that would otherwise have come up clean. Waiting a
+    # comfortable margin over that ~110s before ever checking removes the
+    # race entirely, rather than trying to make the check itself faster
+    # or more tolerant. Only applies here (boot) - the periodic cron check
+    # runs against an already-stable system, so it has no equivalent race
+    # to wait out.
+    sleep 180
+
     /usr/bin/wifi-agent.sh recover-radio
 
     crontab_file="/etc/crontabs/root"
