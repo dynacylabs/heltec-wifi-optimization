@@ -245,6 +245,23 @@ wifi24_ifname() {
 # solar/battery - doesn't strand the link on a channel the peer isn't
 # listening on.
 verify_and_recover_radio() {
+    # Belt-and-suspenders on top of wifi-agent-boot.init's own marker
+    # check - added 2026-08-11 after finding that check alone doesn't
+    # actually gate an already-registered cron job. wifi-agent-boot.init's
+    # start() only consults /etc/wifi-agent-disabled to decide whether to
+    # (re-)register the `*/15 * * * *` cron line at boot; once that line
+    # already exists in the crontab (as it did here from before the
+    # marker was ever introduced), touching the marker did NOT stop cron
+    # from invoking this function every 15 minutes regardless - this
+    # dispatch path had no marker check of its own. Checking it here
+    # closes that gap for every caller (cron, boot, or a manual
+    # `recover-radio` invocation) in one place, rather than relying on
+    # every future caller to remember to check it themselves.
+    if [ -e /etc/wifi-agent-disabled ]; then
+        logger -t wifi-agent "recover-radio: /etc/wifi-agent-disabled present - on-device automation is disabled, skipping"
+        return 0
+    fi
+
     # Serialize against any other radio-touching operation (a server-driven
     # apply, or another overlapping invocation of this same function) -
     # see acquire_radio_lock's comment. Bailing out here (rather than
