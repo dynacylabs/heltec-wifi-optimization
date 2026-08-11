@@ -871,7 +871,7 @@ async def get_command_history(limit: int = Query(default=50, gt=0, le=500)):
 
 
 @app.get("/api/events", response_model=list[DeviceEventEntry], dependencies=[Depends(require_token)])
-async def get_events(limit: int = Query(default=200, gt=0, le=1000)):
+async def get_events(limit: int = Query(default=50, gt=0, le=1000), offset: int = Query(default=0, ge=0)):
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -879,9 +879,9 @@ async def get_events(limit: int = Query(default=200, gt=0, le=1000)):
             SELECT e.id, d.mac AS device_mac, d.role AS device_role, e.occurred_at,
                    e.source, e.event_type, e.message, e.details
             FROM device_events e JOIN devices d ON d.id = e.device_id
-            ORDER BY e.occurred_at DESC LIMIT $1
+            ORDER BY e.occurred_at DESC LIMIT $1 OFFSET $2
             """,
-            limit,
+            limit, offset,
         )
         return [DeviceEventEntry(**dict(r)) for r in rows]
 
@@ -1097,6 +1097,22 @@ async def download_backup(backup_id: int):
             media_type="application/gzip",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+
+
+@app.delete("/api/backups/{backup_id}", status_code=204, dependencies=[Depends(require_token)])
+async def delete_backup(backup_id: int):
+    # Manual counterpart to poll_backups' automatic pruning
+    # (backup_retention_count, System Settings) - that only trims oldest
+    # versions once a *new* backup comes in, so it doesn't help someone
+    # who wants to clear out old versions right now, or who wants to keep
+    # more than backup_retention_count around normally but drop a couple
+    # of one-off versions today.
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM device_backups WHERE id = $1", backup_id)
+    if result == "DELETE 0":
+        raise HTTPException(404, "unknown backup")
+    logger.warning("Backup %d deleted via dashboard", backup_id)
 
 
 @app.post("/api/backups/{backup_id}/restore", dependencies=[Depends(require_token)])

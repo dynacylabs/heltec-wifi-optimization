@@ -130,6 +130,7 @@
     cursor: pointer; background: var(--accent); color: #0d1117;
   }
   .settings-actions button.secondary { background: var(--border); color: var(--text); }
+  .settings-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
   .settings-status { font-size: 12px; color: var(--muted); }
   .provision-panel {
     display: none; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border);
@@ -245,7 +246,20 @@
 
   <h2>Activity Log</h2>
   <div class="chart-help">Every reboot (and why), every channel change (commanded by the optimizer/dashboard, or uncommanded - e.g. the HaLow chip's own ECSA behavior), and on-device recovery actions (chip-reset attempts, corrupted-defaults detection) reported straight from the device's own event log. "Device"-sourced rows are things wifi-agent.sh did on its own between polls; "Server"-sourced rows are things this app decided or observed.</div>
+  <div class="range-picker" id="event-page-size">
+    <span style="color: var(--muted); font-size: 13px; margin-right: 4px; align-self: center;">Show</span>
+    <button data-size="25">25</button>
+    <button data-size="50" class="active">50</button>
+    <button data-size="100">100</button>
+    <button data-size="200">200</button>
+    <button data-size="500">500</button>
+  </div>
   <div class="table-scroll" id="event-log"></div>
+  <div class="settings-actions" id="event-pagination" style="margin-top: 10px;">
+    <button class="secondary" id="event-prev-btn" onclick="eventsPrevPage()">&larr; Newer</button>
+    <span class="settings-status" id="event-page-label"></span>
+    <button class="secondary" id="event-next-btn" onclick="eventsNextPage()">Older &rarr;</button>
+  </div>
 
   </div>
   <!-- ==================== Settings view ==================== -->
@@ -582,6 +596,7 @@ async function sendTestNotification() {
 function showApp() {
   showTab(location.pathname.includes("settings") ? "settings" : "dashboard", { pushState: false });
   initCharts();
+  initEventPagination();
   refreshAll();
   refreshOptimizerState();
   loadSettings();
@@ -700,6 +715,17 @@ function initCharts() {
     selectedHours = parseFloat(e.target.dataset.hours);
     refreshCharts();
     refreshStatus(); // uptime % is computed over the same selected range
+  });
+}
+
+function initEventPagination() {
+  document.getElementById("event-page-size").addEventListener("click", (e) => {
+    if (e.target.tagName !== "BUTTON") return;
+    document.querySelectorAll("#event-page-size button").forEach(b => b.classList.remove("active"));
+    e.target.classList.add("active");
+    eventsPageSize = parseInt(e.target.dataset.size, 10);
+    eventsOffset = 0; // page size changed - back to the newest page
+    refreshEvents();
   });
 }
 
@@ -883,30 +909,54 @@ function eventTypeBadge(eventType) {
   return `<span class="badge ${eventBadgeClass(eventType)}">${eventType}</span>`;
 }
 
+let eventsPageSize = 50;
+let eventsOffset = 0;
+
 async function refreshEvents() {
-  const resp = await api("/api/events?limit=200");
+  // Fetch one extra row past the page size purely to know whether an
+  // "Older" page exists, without a separate COUNT(*) query - the extra
+  // row itself is never rendered.
+  const resp = await api(`/api/events?limit=${eventsPageSize + 1}&offset=${eventsOffset}`);
   if (!resp.ok) return;
   const events = await resp.json();
+  const hasNext = events.length > eventsPageSize;
+  const pageEvents = events.slice(0, eventsPageSize);
   const container = document.getElementById("event-log");
-  if (events.length === 0) {
-    container.innerHTML = '<div class="empty">No events recorded yet.</div>';
-    return;
+  if (pageEvents.length === 0) {
+    container.innerHTML = eventsOffset === 0
+      ? '<div class="empty">No events recorded yet.</div>'
+      : '<div class="empty">No events on this page.</div>';
+  } else {
+    const rows = pageEvents.map(e => `
+      <tr>
+        <td data-label="Time">${new Date(e.occurred_at).toLocaleString()}</td>
+        <td data-label="Device">${e.device_role}</td>
+        <td data-label="Source">${e.source}</td>
+        <td data-label="Type">${eventTypeBadge(e.event_type)}</td>
+        <td data-label="Message">${e.message}</td>
+      </tr>
+    `).join("");
+    container.innerHTML = `
+      <table>
+        <thead><tr><th>Time</th><th>Device</th><th>Source</th><th>Type</th><th>Message</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
   }
-  const rows = events.map(e => `
-    <tr>
-      <td data-label="Time">${new Date(e.occurred_at).toLocaleString()}</td>
-      <td data-label="Device">${e.device_role}</td>
-      <td data-label="Source">${e.source}</td>
-      <td data-label="Type">${eventTypeBadge(e.event_type)}</td>
-      <td data-label="Message">${e.message}</td>
-    </tr>
-  `).join("");
-  container.innerHTML = `
-    <table>
-      <thead><tr><th>Time</th><th>Device</th><th>Source</th><th>Type</th><th>Message</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-  `;
+  const page = Math.floor(eventsOffset / eventsPageSize) + 1;
+  document.getElementById("event-page-label").textContent = `Page ${page}`;
+  document.getElementById("event-prev-btn").disabled = eventsOffset === 0;
+  document.getElementById("event-next-btn").disabled = !hasNext;
+}
+
+function eventsPrevPage() {
+  eventsOffset = Math.max(0, eventsOffset - eventsPageSize);
+  refreshEvents();
+}
+
+function eventsNextPage() {
+  eventsOffset += eventsPageSize;
+  refreshEvents();
 }
 
 function formatBytes(n) {
@@ -934,6 +984,8 @@ async function refreshBackups() {
         <a href="/api/backups/${b.id}/download?token=${encodeURIComponent(TOKEN)}">Download</a>
         &nbsp;|&nbsp;
         <a href="#" onclick="restoreBackup(${b.id}, ${JSON.stringify(b.device_role)}); return false;">Restore</a>
+        &nbsp;|&nbsp;
+        <a href="#" onclick="deleteBackup(${b.id}); return false;">Delete</a>
       </td>
     </tr>
   `).join("");
@@ -949,6 +1001,16 @@ async function restoreBackup(backupId, roleLabel) {
   if (!confirm(`Restore this ${roleLabel} backup onto the device now? Its network services will restart.`)) return;
   const resp = await api(`/api/backups/${backupId}/restore`, { method: "POST" });
   alert(resp.ok ? "Restore complete." : `Restore failed: ${await resp.text()}`);
+}
+
+async function deleteBackup(backupId) {
+  if (!confirm("Delete this backup version? This can't be undone.")) return;
+  const resp = await api(`/api/backups/${backupId}`, { method: "DELETE" });
+  if (resp.ok) {
+    refreshBackups();
+  } else {
+    alert(`Delete failed: ${await resp.text()}`);
+  }
 }
 
 function deviceTargetCard(t) {
