@@ -301,7 +301,7 @@ async def _record_channel_change_if_any(conn, device_id, radio: str, new_channel
             SELECT 1 FROM commands
             WHERE device_id = $1 AND param = $2 AND status IN ('applied', 'acked')
               AND (target_value->>'channel')::int = $3
-              AND applied_at > $4 - make_interval(mins => $5)
+              AND applied_at > $4::timestamptz - make_interval(mins => $5)
         )
         """,
         device_id, param, new_channel, now, CHANNEL_CHANGE_COMMAND_LOOKBACK_MINUTES,
